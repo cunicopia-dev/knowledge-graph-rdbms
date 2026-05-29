@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "knowledge-graph-rdbms"
+version = "0.1.0"
+description = "A label property graph on an RDBMS (SQLite): nodes, typed edges, an append-only event log, and an optional MCP server."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["knowledge-graph", "graph", "label-property-graph", "sqlite", "mcp", "event-sourcing"]
+classifiers = [
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+dev = ["pytest>=7.0", "mcp>=1.0"]
+
+[project.scripts]
+kgrdbms-mcp = "kgrdbms.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kgrdbms"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
