@@ -85,6 +85,36 @@ def test_descendants(mcp_mod):
 # ---- writes ----------------------------------------------------------
 
 
+def test_import_bulk_in_one_call(mcp_mod):
+    res = mcp_mod.kg_import(
+        nodes=[
+            {"id": "person:ada", "kind": "Person", "name": "Ada", "labels": ["Person"],
+             "properties": {"born": 1815}},
+            {"id": "field:cs", "kind": "Field", "name": "CS"},
+        ],
+        edges=[{"from": "person:ada", "to": "field:cs", "type": "FOUNDED",
+                "properties": {"year": 1843}}],
+    )
+    assert res["nodes_imported"] == 2 and res["edges_imported"] == 1
+    assert mcp_mod.kg_node_get("person:ada")["properties"]["born"] == 1815
+    assert mcp_mod.kg_shortest_path("person:ada", "field:cs")[-1]["id"] == "field:cs"
+    # every imported item was logged (2 upserts + 1 edge)
+    assert len(mcp_mod.kg_events_tail(10)) == 3
+
+
+def test_import_is_idempotent_and_gated(mcp_mod, monkeypatch):
+    doc = {"nodes": [{"id": "a:1", "kind": "T", "name": "1"}], "edges": []}
+    mcp_mod.kg_import(**doc)
+    mcp_mod.kg_import(**doc)  # re-import merges, not duplicates
+    assert len(mcp_mod.kg_nodes_by_kind("T")) == 1
+    # a denying policy aborts the whole import (atomic) and raises
+    from kgrdbms.policy import Decision
+    monkeypatch.setattr("kgrdbms.policy.mutation_check", lambda ctx: Decision.deny("sealed"))
+    with pytest.raises(PermissionError):
+        mcp_mod.kg_import(nodes=[{"id": "b:1", "kind": "T", "name": "x"}])
+    assert mcp_mod.kg_node_get("b:1") is None  # nothing written
+
+
 def test_edge_add_and_remove_roundtrip(mcp_mod):
     mcp_mod.kg_node_upsert(id="x:1", kind="X", name="one")
     mcp_mod.kg_node_upsert(id="x:2", kind="X", name="two")

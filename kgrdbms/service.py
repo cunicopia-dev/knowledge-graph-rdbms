@@ -175,3 +175,47 @@ def revert_event(events: EventLog, event_id: str, actor: str = "operator") -> Gr
 def replay_log(graph: Graph, events: EventLog, upto_ts: str | None = None) -> dict:
     """Rebuild the projection from the log (optionally to a past instant)."""
     return replay(graph, events, upto_ts=upto_ts)
+
+
+# ---- bulk import (the shared bulk write path) ------------------------
+
+
+def import_graph(
+    graph: Graph,
+    events: EventLog,
+    *,
+    nodes: list[dict] | None = None,
+    edges: list[dict] | None = None,
+    actor: str = "import",
+) -> dict:
+    """Apply many nodes then edges in ONE gated+logged transaction.
+
+    Each item is individually gated (invariants then policy) and recorded as a
+    reversible event — bulk does NOT bypass the gate. The whole thing rides one
+    `batch()` so it commits once (fast) and is atomic: if any item is denied,
+    the batch rolls back and nothing is written. Both `kg import` (CLI) and
+    `kg_import` (MCP) are thin callers of this, so there is one bulk path, not two.
+
+    Node specs: {id, kind, name?, labels?, properties?}.
+    Edge specs: {from|from_node, to|to_node, type, properties?}.
+    """
+    nodes = nodes or []
+    edges = edges or []
+    n_nodes = n_edges = 0
+    with graph.batch():
+        for spec in nodes:
+            upsert_node(
+                graph, events,
+                id=spec["id"], kind=spec["kind"], name=spec.get("name"),
+                labels=list(spec.get("labels", [])), properties=dict(spec.get("properties", {})),
+                actor=actor,
+            )
+            n_nodes += 1
+        for spec in edges:
+            add_edge(
+                graph, events,
+                spec.get("from", spec.get("from_node")), spec.get("to", spec.get("to_node")),
+                spec["type"], properties=dict(spec.get("properties", {})), actor=actor,
+            )
+            n_edges += 1
+    return {"nodes_imported": n_nodes, "edges_imported": n_edges}

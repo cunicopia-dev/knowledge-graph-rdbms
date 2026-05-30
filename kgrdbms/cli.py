@@ -343,31 +343,18 @@ def cmd_replay(app: App, args) -> int:
 def cmd_import(app: App, args) -> int:
     """Bulk import a {"nodes": [...], "edges": [...]} JSON document.
 
-    Wrapped in a single graph.batch(): every write defers to one commit, so the
-    import is fast *and* fully gated + logged (the event records ride the same
-    transaction). That makes the imported state survive a later `kg replay`.
+    Delegates to `service.import_graph` — one gated + logged batch (the same path
+    the MCP `kg_import` tool uses), so a bulk load is fast, fully recorded, and
+    survives a later `kg replay`.
     """
     with open(args.file, encoding="utf-8") as fh:
         doc = json.load(fh)
-    n_nodes = n_edges = 0
-    with app.graph.batch():
-        for spec in doc.get("nodes", []):
-            service.upsert_node(
-                app.graph, app.events,
-                id=spec["id"], kind=spec["kind"], name=spec.get("name"),
-                labels=list(spec.get("labels", [])), properties=dict(spec.get("properties", {})),
-                actor=args.actor,
-            )
-            n_nodes += 1
-        for spec in doc.get("edges", []):
-            service.add_edge(
-                app.graph, app.events,
-                spec.get("from", spec.get("from_node")), spec.get("to", spec.get("to_node")),
-                spec["type"], properties=dict(spec.get("properties", {})), actor=args.actor,
-            )
-            n_edges += 1
-    res = {"nodes_imported": n_nodes, "edges_imported": n_edges}
-    app.emit(res, f"imported {n_nodes:,} nodes and {n_edges:,} edges (gated + logged)")
+    res = service.import_graph(
+        app.graph, app.events,
+        nodes=doc.get("nodes", []), edges=doc.get("edges", []), actor=args.actor,
+    )
+    app.emit(res, f"imported {res['nodes_imported']:,} nodes and "
+                  f"{res['edges_imported']:,} edges (gated + logged)")
     return 0
 
 

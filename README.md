@@ -540,7 +540,9 @@ Or hand-edit a client config (e.g. Claude Desktop):
 
 It exposes `kg_`-prefixed tools for reads (`kg_node_get`, `kg_nodes_by_kind`,
 `kg_neighborhood`, `kg_shortest_path`, `kg_descendants`, …), gated writes
-(`kg_node_upsert`, `kg_edge_add`, `kg_node_delete`, …), and the event log
+(`kg_node_upsert`, `kg_edge_add`, `kg_node_delete`, …), bulk composition
+(`kg_import` — a whole `{nodes, edges}` batch in one call, so an agent populates
+an ontology in a single tool call instead of dozens), and the event log
 (`kg_events_tail`, `kg_event_revert`, `kg_replay`). Every write passes through
 the invariants + policy gate and is recorded — same engine, same file as the
 CLI. Every tool also takes an optional `ontology` name (omit for the default),

@@ -12,7 +12,8 @@ set `engine`, and replace methods one at a time as you build the real thing.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from contextlib import contextmanager
+from typing import Any, Iterator, Protocol, runtime_checkable
 
 from kgrdbms.graph import Edge, Node
 
@@ -46,6 +47,8 @@ class GraphBackend(Protocol):
     def count_edges_by_type(self) -> dict[str, int]: ...
     def total_nodes(self) -> int: ...
     def total_edges(self) -> int: ...
+    # bulk: a context manager that defers commits to one transaction
+    def batch(self) -> Any: ...
     def close(self) -> None: ...
 
 
@@ -90,6 +93,11 @@ class _StubBackend:
     def count_edges_by_type(self, *a: Any, **k: Any) -> dict[str, int]: return self._todo("count_edges_by_type")
     def total_nodes(self, *a: Any, **k: Any) -> int: return self._todo("total_nodes")
     def total_edges(self, *a: Any, **k: Any) -> int: return self._todo("total_edges")
+
+    @contextmanager
+    def batch(self) -> Iterator["_StubBackend"]:
+        """A no-op batch — writes inside still raise via _todo when attempted."""
+        yield self
 
     def close(self) -> None:
         """Closing a never-opened stub is a no-op (keeps resolver cleanup safe)."""

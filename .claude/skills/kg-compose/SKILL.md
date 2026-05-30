@@ -42,14 +42,19 @@ CURIE `prefix:slug`). These are the guidance you compose within.
   about the relationship itself — `year`, `confidence`, `source`).
 - Let the **stance** govern how far past the literal text you go.
 
-### 3. Write it (bulk, gated, logged)
-Build the model as JSON and import it into the target ontology:
-```bash
-kg --ontology NAME import /tmp/compose.json --actor kg-compose
-```
-`import` runs the gated + logged path inside one transaction — fast *and* fully
-recorded, so it survives `kg --ontology NAME replay`. Re-running on overlapping
-sources is safe: stable CURIE ids make re-imports **merge**, never duplicate.
+### 3. Write it (bulk, gated, logged — ONE call, not N)
+Write the whole `{nodes, edges}` model in a single bulk operation. **Do not emit
+dozens of individual upsert calls** — use the bulk path:
+
+- **Over MCP:** call `kg_import(nodes=[...], edges=[...], ontology="NAME")` once.
+- **Over the CLI:** `kg --ontology NAME import /tmp/compose.json --actor kg-compose`.
+
+Both run the same gated + logged path inside one transaction — fast *and* fully
+recorded, so it survives replay. Every node/edge is still individually gated and
+reversible; bulk only collapses the commit, not the gate. Re-running on
+overlapping sources is safe: stable CURIE ids make re-imports **merge**, never
+duplicate. For a very large source, chunk into a few `kg_import` calls rather
+than one per entity.
 
 ### 4. Verify and hand back the receipt
 - `kg --ontology NAME stats` — what landed.
@@ -105,5 +110,6 @@ choice; it's the one non-negotiable.
   `person:ada-lovelace`) — breaks cross-document dedup.
 - Inventing relationships under `literal` stance.
 - Encoding a whole sentence as a node `name` instead of extracting the entity.
-- Writing per-node with many `kg node add` calls when `import` would do it in one
-  gated, logged, atomic batch.
+- Emitting one write per entity — dozens of `kg_node_upsert`/`kg node add` calls —
+  when a single `kg_import` (MCP) or `kg import` (CLI) does the whole batch in one
+  gated, logged, atomic transaction. This is the most common mistake; don't.

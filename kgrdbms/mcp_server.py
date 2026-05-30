@@ -37,6 +37,8 @@ Tool surface (all prefixed kg_):
     kg_node_delete        — delete a node and its edges
     kg_edge_add           — add a (from, type, to) edge
     kg_edge_remove        — remove a (from, type, to) edge
+    kg_import             — bulk {nodes, edges} in ONE call (one batch; use this
+                            to compose an ontology instead of N upsert calls)
 
   event log
     kg_events_tail        — most recent events
@@ -335,6 +337,33 @@ def kg_edge_remove(
     """Remove a specific edge by (from, type, to). Idempotent. Logged + reversible."""
     b = _bundle(ontology)
     return service.remove_edge(b.backend, b.events, from_id, to_id, type, actor=actor)
+
+
+@mcp.tool()
+def kg_import(
+    nodes: list[dict] | None = None,
+    edges: list[dict] | None = None,
+    actor: str = "kg-compose",
+    ontology: str | None = None,
+) -> dict:
+    """Bulk-create many nodes and edges in ONE call (one gated + logged transaction).
+
+    Use this instead of dozens of kg_node_upsert / kg_edge_add calls when
+    composing an ontology from a document — pass the whole graph at once:
+
+        nodes = [{"id": "person:ada", "kind": "Person", "name": "Ada Lovelace",
+                  "labels": ["Person"], "properties": {"born": 1815}}, ...]
+        edges = [{"from": "person:ada", "to": "field:cs", "type": "FOUNDED",
+                  "properties": {"year": 1843}}, ...]   # from_node/to_node also accepted
+
+    Every node and edge is still individually gated (invariants then policy) and
+    recorded as a reversible event — bulk does not bypass the gate. The batch
+    commits once and is atomic: if any item is denied, nothing is written.
+    Returns {ontology, nodes_imported, edges_imported}.
+    """
+    b = _bundle(ontology)
+    res = service.import_graph(b.backend, b.events, nodes=nodes, edges=edges, actor=actor)
+    return {"ontology": b.entry.name, **res}
 
 
 # ---- event log: read + reversal + replay ----------------------------
