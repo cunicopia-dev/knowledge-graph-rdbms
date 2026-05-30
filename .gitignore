@@ -20,6 +20,10 @@ htmlcov/
 *.db-wal
 *.db-shm
 
+# Scratch / generated artifacts (benchmark JSON, charts).
+# Promote a chart worth keeping into assets/ and commit that explicitly.
+temp/
+
 # OS / editor
 .DS_Store
 .idea/

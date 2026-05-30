@@ -113,3 +113,28 @@ language into C and back.
 favor one runtime across operations. The lever that actually moved kgrdbms was
 transaction batching (~10×, see above) — not the language. The interesting part
 of the project (event sourcing, the gate, three front doors) is runtime-agnostic.
+
+---
+
+## 3. Charts
+
+`charts.py` turns benchmark data into publication-quality PNG/SVG — the write
+throughput bars, the read-latency dumbbell (p50→p99), and the cross-runtime
+comparison.
+
+```bash
+pip install "knowledge-graph-rdbms[charts]"     # matplotlib
+
+python bench/charts.py                           # run fresh + render all → temp/
+python bench/charts.py --input temp/results.json # reuse saved benchmark JSON
+python bench/charts.py --no-runtimes --svg       # skip cross-runtime, also emit SVG
+```
+
+It's a pure consumer: `benchmark.py --json` → `charts.py` → images. Decoupled so
+you can re-style without re-measuring. Styling (palette, fonts, captions) lives
+in the constants at the top of `charts.py` — that's the knob to make them yours.
+
+Output lands in **`temp/`, which is gitignored** — generated images never bloat
+git history. When a chart is good enough for the README, *promote* it: move it
+into a committed `assets/` directory and reference it from there. Disposable by
+default, permanent by choice.
