@@ -146,15 +146,20 @@ def kg_ontology_create(
     backend: str = "sqlite",
     description: str = "",
     stance: str = "literal",
+    location: str | None = None,
 ) -> dict:
     """Register a new ontology (or update an existing one's metadata).
 
-    `backend` routes the engine ("sqlite" is live; "postgres"/"neo4j" are
-    registered stubs). `stance` is the ontology's own extraction opinion
-    ("literal" vs "inferential") that a composing agent should honor. The
-    ontology becomes immediately addressable via the `ontology` argument.
+    `backend` routes the engine ("sqlite" and "postgres" are live; "neo4j" is a
+    registered stub). `location` is the backend location — a DSN
+    (postgresql://…) for postgres; omit for a managed sqlite file. `stance` is
+    the ontology's own extraction opinion ("literal" vs "inferential") that a
+    composing agent should honor. The ontology is immediately addressable via
+    the `ontology` argument on any tool.
     """
-    entry = resolver.register(name, backend=backend, description=description, stance=stance)
+    entry = resolver.register(
+        name, backend=backend, description=description, stance=stance, path=location
+    )
     _BUNDLES.pop(name, None)  # drop any stale cached bundle for this name
     return {
         "name": entry.name,

@@ -191,7 +191,8 @@ def cmd_ontology_list(app: App, args) -> int:
 
 def cmd_ontology_create(app: App, args) -> int:
     entry = resolver.register(
-        args.name, backend=args.backend, description=args.description or "", stance=args.stance
+        args.name, backend=args.backend, description=args.description or "", stance=args.stance,
+        path=args.location,
     )
     app.emit(
         _ontology_dict(entry),
@@ -402,7 +403,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=cmd_ontology_list)
     a = ont.add_parser("create", help="register a new ontology (name, backend, opinion)")
     a.add_argument("name")
-    a.add_argument("--backend", default="sqlite", help="engine: sqlite (live) | postgres | neo4j (stubs)")
+    a.add_argument("--backend", default="sqlite", help="engine: sqlite | postgres (live) | neo4j (stub)")
+    a.add_argument("--location", help="backend location: a DSN for postgres (postgresql://…); "
+                                      "omit for a managed sqlite file")
     a.add_argument("--description", default="")
     a.add_argument("--stance", default="literal", help="extraction opinion: literal | inferential | ...")
     a.set_defaults(func=cmd_ontology_create)

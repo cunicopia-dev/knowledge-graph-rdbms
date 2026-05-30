@@ -14,7 +14,11 @@ Implementation sketch (when we build it):
   * Neo4j is its OWN source of truth, so the event log MUST live in the control
     plane (SQLite): apply each gated event to Neo4j as a projection, keep the
     log — that's how audit / replay / undo survive a non-relational backend.
-    This is the seam noted in resolver._control_plane_log.
+    That seam is now built: the resolver already pairs any non-sqlite backend
+    with a `_ControlPlaneLogStore` (an events.db sidecar) via
+    `EventLog(store, projection=backend)`, exactly as the live postgres engine
+    uses it. A Neo4j engine just implements the `GraphBackend` surface; the log
+    plumbing is done.
   * Mind the Bolt round-trip (~0.4ms) — it's the fixed cost the workload router
     is weighing against SQLite's in-process ~7µs.
 

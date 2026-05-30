@@ -62,8 +62,8 @@ The engine above (`graph.py` + `service.py` + the log + the gate) operates on **
 **`backends/` is the pluggable data plane (engine registry).** An engine is a factory `(*, location, **opts) -> GraphBackend` registered with `@backend("name")`. Adding one = write a module + decorate its factory + add one import line in `backends/__init__.py`. **No switch to edit** — `resolver._open_backend` does `get_backend(entry.backend)(location=...)` and never knows which engines exist.
 
 - `backends/base.py` — the `GraphBackend` Protocol (the finite method surface `service.py` + reads depend on; `Graph` satisfies it *structurally*, zero changes to `graph.py`) and `_StubBackend` (raising skeleton so a half-built engine is still a routable, fail-loud `GraphBackend`).
-- `sqlite.py` is **live** (thin adapter over `Graph`). `postgres.py` / `neo4j.py` are **stubs** — they route and fail per-call with what's missing; their docstrings are the ADR for *how* they'd be built and *why* (postgres = scale-up via recursive CTEs/jsonb; neo4j = deep-traversal escalation, and its log **must** move to a control-plane SQLite since Neo4j is its own source of truth).
-- **The event log is welded to SQLite today.** `EventLog(graph)` shares the graph's `conn` and writes `graph_events` into the same file. For a non-sqlite backend the log must live in the control plane (see `resolver._control_plane_log`, currently a loud `NotImplementedError`). This backend-seam ↔ log-seam coupling is the single most important thing to get right when wiring a real non-sqlite engine.
+- `sqlite.py` and `postgres.py` are **live**; `neo4j.py` is a **stub** (routes and fails per-call with what's missing; its docstring is the ADR for how it'd be built). `postgres.py` is the scale-up: same five-table model + query shapes ported to psycopg (`%s`, `ON CONFLICT`, `jsonb` properties, `= ANY(%s)`, the recursive-CTE `descendants`, BFS traversals reused verbatim). It needs the `postgres` extra (`psycopg`), imported lazily so `import kgrdbms.backends` works without it; a missing driver raises `NotImplementedError`. `location` for postgres is a DSN, not a file path — `register()` requires it for any non-sqlite backend.
+- **The event log is decoupled from the backend.** `EventLog(store, projection=None)`: *store* is the SQLite that holds the log rows; *projection* is the `GraphBackend` that `compensate()`/replay apply to. They coincide for sqlite (`EventLog(graph)` — projection defaults to store, unchanged). For postgres the store is `resolver._ControlPlaneLogStore` (a `<root>/ontologies/<slug>/events.db` sidecar) and the projection is the `PostgresGraph` — so audit/replay/undo keep working with graph data in Postgres and history in SQLite. `apply_event` only calls `GraphBackend` methods, so it drives any backend. This store↔projection split is the seam to respect for *any* non-sqlite engine (neo4j next).
 - **New failure class:** routing to a stub engine raises `NotImplementedError`. Every front door's error handling must account for it (the CLI's `main()` already maps it to `unavailable: …` / exit 1).
 
 ## Layout
@@ -80,7 +80,7 @@ kgrdbms/
 │   ├── base.py     #   GraphBackend Protocol + _StubBackend
 │   ├── __init__.py #   registry: @backend(name), get_backend, available_backends
 │   ├── sqlite.py   #   live engine (adapter over Graph)
-│   ├── postgres.py #   stub (scale-up)
+│   ├── postgres.py #   live engine (psycopg; jsonb + recursive CTEs); needs [postgres] extra
 │   └── neo4j.py    #   stub (deep-traversal escalation)
 ├── cli.py          # the `kg` command (stdlib argparse) — `--ontology` / `--db` / `kg ontology …`
 └── mcp_server.py   # MCP server, kg_-prefixed tools, each with optional `ontology=` (optional [mcp] extra)

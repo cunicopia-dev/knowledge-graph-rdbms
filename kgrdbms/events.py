@@ -108,11 +108,27 @@ def edge_spec(edge) -> dict[str, Any]:
 
 
 class EventLog:
-    """Append-only event log attached to a Graph's SQLite connection."""
+    """Append-only event log over a SQLite store, applied to a projection.
 
-    def __init__(self, graph: "Graph") -> None:
-        self.graph = graph
-        self.conn = graph.conn
+    Two roles that coincide for SQLite but split for other engines:
+
+      * **store** — where the log rows live. Must expose a SQLite `.conn` and a
+        `.tx()` transaction context. For a SQLite-backed ontology this *is* the
+        graph (the log shares its file). For a non-SQLite ontology it's a
+        control-plane SQLite store (see `resolver`), keeping audit/replay/undo
+        working even though the graph data lives elsewhere.
+      * **projection** — the `GraphBackend` that `compensate()` applies inverse
+        events to. Defaults to the store, so `EventLog(graph)` is unchanged.
+
+    `apply_event` only touches `GraphBackend` methods, so compensation and replay
+    work against any backend once storage is decoupled from the projection.
+    """
+
+    def __init__(self, store: "Graph", projection: Any = None) -> None:
+        self.store = store
+        self.conn = store.conn
+        self.projection = projection if projection is not None else store
+        self.graph = self.projection  # back-compat alias for external readers
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
 
@@ -128,7 +144,7 @@ class EventLog:
     ) -> GraphEvent:
         eid = uuid.uuid4().hex
         ts = datetime.now(timezone.utc).isoformat()
-        with self.graph.tx():
+        with self.store.tx():
             cur = self.conn.execute(
                 "INSERT INTO graph_events(id, ts, actor, op, payload_json, compensates) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -196,7 +212,7 @@ class EventLog:
 
         inv_op, inv_payload = self._invert(ev)
         comp = self.record(actor, inv_op, inv_payload, compensates=event_id)
-        apply_event(self.graph, comp)  # reflect in the projection now
+        apply_event(self.projection, comp)  # reflect in the projection now
         return comp
 
     @staticmethod

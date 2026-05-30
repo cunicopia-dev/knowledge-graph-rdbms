@@ -28,9 +28,11 @@ own SQLite) and the backend becomes a pure projection target — so audit / repl
 from __future__ import annotations
 
 import os
+import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from kgrdbms.backends import GraphBackend, available_backends, get_backend
 from kgrdbms.events import EventLog
@@ -166,6 +168,11 @@ def register(
 ) -> OntologyEntry:
     """Add (or update) an ontology in the index. Writes go direct — the registry
     is control-plane bookkeeping, not gated user data."""
+    if backend != "sqlite" and not path:
+        raise ValueError(
+            f"backend {backend!r} requires an explicit location (a DSN), e.g. "
+            f"--location 'postgresql://user:pass@host:5432/db'"
+        )
     entry = OntologyEntry(
         name=name,
         path=path or str(_default_db_path(name, root)),
@@ -212,14 +219,51 @@ def resolve(name: str | None = None, *, root: str | Path | None = None) -> Resol
     name = name or default_ontology_name()
     entry = get_entry(name, root) or register(name, root=root)
     backend = _open_backend(entry)
-    # Log is a SEPARATE step. For sqlite it shares the backend's file; for a
-    # future non-sqlite backend it would be opened against control-plane storage
-    # so audit/replay survive the backend swap.
-    events = EventLog(backend) if entry.backend == "sqlite" else _control_plane_log(entry, root)
+    # The log is a SEPARATE concern from the backend. For sqlite it shares the
+    # backend's file (store == projection). For any non-sqlite backend the log
+    # lives in a control-plane SQLite store, so audit / replay / undo survive the
+    # backend swap — the backend is just the projection compensation applies to.
+    if entry.backend == "sqlite":
+        events = EventLog(backend)
+    else:
+        events = EventLog(_control_plane_log_store(entry, root), projection=backend)
     return Resolved(backend=backend, events=events, entry=entry)
 
 
-def _control_plane_log(entry: OntologyEntry, root: str | Path | None) -> EventLog:  # pragma: no cover
-    raise NotImplementedError(
-        "non-sqlite backends need a control-plane event log (own SQLite); not built yet."
-    )
+class _ControlPlaneLogStore:
+    """Standalone SQLite store for a non-sqlite ontology's event log.
+
+    Provides the `(.conn, .tx())` surface `EventLog` needs, decoupled from the
+    graph backend. This is the seam the neo4j/postgres stub docstrings flagged:
+    the control plane owns history (in SQLite) regardless of where graph data
+    physically lives.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.commit()
+
+    @contextmanager
+    def tx(self) -> Iterator[sqlite3.Connection]:
+        try:
+            yield self.conn
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+
+def _control_plane_log_store(entry: OntologyEntry, root: str | Path | None) -> _ControlPlaneLogStore:
+    """Where a non-sqlite ontology's event log lives: an `events.db` sidecar in
+    that ontology's control-plane directory."""
+    log_path = ontologies_root(root) / "ontologies" / slug(entry.name) / "events.db"
+    return _ControlPlaneLogStore(log_path)

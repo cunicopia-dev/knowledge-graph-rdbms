@@ -271,7 +271,7 @@ flowchart TD
     IDX[["index.db<br/>the registry — itself a kg"]]
     REG{"backend registry"}
     SQ[("sqlite · live")]
-    PG[("postgres · stub")]
+    PG[("postgres · live")]
     NEO[("neo4j · stub")]
 
     CLI --> RES
@@ -293,12 +293,25 @@ flowchart TD
 - **Isolation is filesystem-shaped.** Each ontology is its own file with its own
   event log. "Coffee doesn't know Ada" because they are different files — no
   tenant ids, no row filtering, no leak surface.
-- **The engine is pluggable.** A backend is a factory registered under a name;
-  `sqlite` is live, `postgres` and `neo4j` are stubs that route and fail loudly
-  until built. Most ontologies stay embedded SQLite — the zero-dependency
+- **The engine is pluggable.** A backend is a factory registered under a name.
+  `sqlite` and `postgres` are live; `neo4j` is a stub that routes and fails
+  loudly until built. Most ontologies stay embedded SQLite — the zero-dependency
   default — while a specific heavy one can be **escalated** to a purpose-built
   engine when its *workload* (not its row count) turns deep. Philosophy #6, "pay
   for speed only when you ask," generalized from batching to whole engines.
+- **History is owned by the control plane, not the engine.** A non-sqlite
+  ontology keeps its append-only event log in a control-plane SQLite store
+  (`<root>/ontologies/<slug>/events.db`); the engine is just the *projection*
+  that replay and undo apply to. So a Postgres-backed ontology still gets the
+  full audit / time-travel / one-command-revert story — graph data in Postgres,
+  history in SQLite.
+
+```bash
+pip install "knowledge-graph-rdbms[postgres]"     # the psycopg-backed engine
+kg ontology create big --backend postgres \
+   --location "postgresql://user:pass@host:5432/db" --stance inferential
+kg --ontology big node add company:acme --kind Company --name Acme   # writes to Postgres
+```
 
 ```bash
 kg ontology create coffee --stance inferential       # register (lands in index.db)
@@ -661,7 +674,8 @@ kgrdbms/
 ├── backends/       # pluggable engine registry
 │   ├── base.py     #   GraphBackend protocol + raising stub skeleton
 │   ├── sqlite.py   #   live engine (adapter over Graph)
-│   └── postgres.py, neo4j.py   # stubs (scale-up / deep-traversal escalation)
+│   ├── postgres.py #   live engine (psycopg; jsonb + recursive CTEs); [postgres] extra
+│   └── neo4j.py    #   stub (deep-traversal escalation)
 ├── cli.py          # the `kg` command (stdlib argparse)
 └── mcp_server.py   # the MCP server (optional [mcp] extra)
 ```
