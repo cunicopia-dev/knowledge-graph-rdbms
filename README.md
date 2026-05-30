@@ -507,27 +507,33 @@ not the language. Reproduce it with `python bench/runtimes/compare.py`.
 
 ### Where the curve bends
 
-Queries compile to SQL over B-tree indexes, so each traversal hop is an index
-lookup. That's wonderfully cheap for point reads and shallow traversals — and
-it's why an embedded SQLite graph beats a networked graph server outright for
-small, frequent operations: no protocol, no round-trip, no JVM warmup, just a
-function call into the same process.
+We measured it against Neo4j — same graph, same queries, identical methodology
+(full harness and reproduction in [`bench/neo4j/`](bench/neo4j/README.md)):
 
-A purpose-built engine (Neo4j and friends) starts to pull ahead when the
-*workload* — not just the row count — shifts toward:
+![Where the crossover is — kgrdbms vs Neo4j](assets/crossover.png)
+
+Queries compile to SQL over B-tree indexes, so each traversal hop is an index
+lookup — wonderfully cheap for point reads and shallow traversals. An in-process
+lookup here is ~7µs, while the *same* query to Neo4j pays a Bolt round-trip
+(~0.4ms) before it even touches data. So for the small, frequent operations that
+are the bread and butter of agent memory, the embedded graph wins by **30–60×**.
+
+A purpose-built engine pulls ahead exactly where the *workload* — not the row
+count — turns deep:
 
 - **Deep, high-fan-out traversal.** Index-free adjacency follows direct pointers
-  between nodes, so a 6-hop walk across a densely connected graph sidesteps the
-  per-hop index lookups SQL repeats.
+  between nodes. A 1,000-deep walk costs kgrdbms ~52ms (recursive CTE + row
+  hydration) but ~0.7ms for Neo4j, which pointer-chases under its own round-trip
+  budget — a **76× swing the other way.**
 - **Complex pattern matching.** A Cypher planner optimizes multi-pattern queries
   in ways a fixed traversal API doesn't attempt.
 - **Concurrent writers and scale-out.** Single-file SQLite is one writer at a
   time; clustered engines aren't.
 
 Rule of thumb: read-heavy and shallow up to low millions of nodes is firmly home
-turf; traversal- or pattern-heavy past tens of millions is where a dedicated
-engine earns its complexity. The crossover is workload-shaped, not a single
-magic number — so the honest move is to benchmark your shape.
+turf; deep-traversal or pattern-heavy work is where a dedicated engine earns its
+complexity. The crossover is workload-shaped, not a single magic number — so we
+measured ours, and you can [measure yours](bench/neo4j/README.md).
 
 ---
 

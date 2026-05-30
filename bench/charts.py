@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -227,6 +228,53 @@ def chart_runtimes(runtimes, env, outdir, fmts):
     _save(fig, outdir, "runtimes", fmts)
 
 
+def chart_crossover(report, outdir, fmts):
+    """Diverging bars: kgrdbms vs Neo4j per-call p50 — where embedded loses to a
+    real graph engine. Consumes bench/neo4j/headtohead.py --json output."""
+    rows = list(reversed(report["results"]))   # shallow ops on top
+    ops = [r["op"] for r in rows]
+    ratios = [r["ratio_p50"] for r in rows]     # >1 → kgrdbms faster
+    logs = [math.log10(r) for r in ratios]
+
+    fig, ax = plt.subplots(figsize=(9.4, 4.8))
+    fig.subplots_adjust(top=0.78, bottom=0.10, left=0.24, right=0.95)
+    y = list(range(len(rows)))
+    colors = [ACCENT if l >= 0 else HILITE for l in logs]
+    ax.barh(y, logs, color=colors, height=0.62, zorder=3)
+    ax.axvline(0, color=INK, linewidth=1.1, zorder=4)
+    ax.set_yticks(y)
+    ax.set_yticklabels(ops)
+
+    for yi, r, l in zip(y, rows, logs):
+        rt = r["ratio_p50"]
+        txt = f"{rt:.0f}× faster" if rt >= 1 else f"{1/rt:.0f}× slower"
+        ha = "left" if l >= 0 else "right"
+        ax.text(l + (0.05 if l >= 0 else -0.05), yi, txt, va="center", ha=ha,
+                fontsize=10.5, fontweight="bold", color=(ACCENT if l >= 0 else HILITE))
+
+    span = max(abs(v) for v in logs) * 1.45
+    ax.set_xlim(-span, span)
+    ax.set_xticks([])
+    for s in ("top", "right", "bottom"):
+        ax.spines[s].set_visible(False)
+    ax.text(span, len(rows) - 0.3, "kgrdbms wins", ha="right", va="bottom",
+            fontsize=10.5, color=ACCENT, fontweight="bold")
+    ax.text(-span, len(rows) - 0.3, "Neo4j wins", ha="left", va="bottom",
+            fontsize=10.5, color=HILITE, fontweight="bold")
+
+    p = report.get("params", {})
+    fig.text(0.015, 0.945, "Where the crossover is: embedded vs. server",
+             fontsize=16, fontweight="bold", color=INK, ha="left")
+    fig.text(0.015, 0.895,
+             "kgrdbms (in-process SQLite) vs Neo4j (Bolt server), per-call p50 latency. "
+             "Shallow ops favor no round-trip; deep traversal favors index-free adjacency.",
+             fontsize=10, color=MUTED, ha="left")
+    fig.text(0.015, 0.02, f"kgrdbms · vs Neo4j 5 · {p.get('scale', '?'):,} nodes · "
+             f"chain {p.get('chain', '?')}", fontsize=8, color=MUTED, ha="left")
+    fig.text(0.985, 0.02, REPO, fontsize=8, color=MUTED, ha="right")
+    _save(fig, outdir, "crossover", fmts)
+
+
 # ---- helpers ---------------------------------------------------------
 
 
@@ -273,6 +321,8 @@ def main(argv=None) -> int:
     ap.add_argument("--outdir", default=str(HERE.parent / "temp"), help="output dir (default: temp/)")
     ap.add_argument("--svg", action="store_true", help="also emit SVG (vector, crisp for READMEs)")
     ap.add_argument("--no-runtimes", action="store_true", help="skip the cross-runtime chart")
+    ap.add_argument("--neo4j", help="head-to-head JSON (from bench/neo4j/headtohead.py --json) → crossover chart")
+    ap.add_argument("--only-neo4j", action="store_true", help="render only the crossover chart")
     ap.add_argument("--scale", type=int, default=10_000)
     ap.add_argument("--iterations", type=int, default=20_000)
     ap.add_argument("--repeats", type=int, default=7)
@@ -283,6 +333,12 @@ def main(argv=None) -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     fmts = ["png"] + (["svg"] if args.svg else [])
+
+    if args.neo4j:
+        chart_crossover(json.loads(Path(args.neo4j).read_text()), outdir, fmts)
+        if args.only_neo4j:
+            print(f"\ncharts in {outdir}/")
+            return 0
 
     env, results = load_benchmark(args)
     chart_write_throughput(results, env, outdir, fmts)
