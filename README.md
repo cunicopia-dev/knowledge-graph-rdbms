@@ -45,6 +45,7 @@ Small enough to hold in your head. Flexible enough to model anything.
 - [Design philosophy](#design-philosophy)
 - [The data model](#the-data-model)
 - [Architecture: three front doors, one engine](#architecture-three-front-doors-one-engine)
+- [Many ontologies: one control plane](#many-ontologies-one-control-plane)
 - [Event sourcing: the graph is a projection](#event-sourcing-the-graph-is-a-projection)
 - [The safety gate: invariants vs. policy](#the-safety-gate-invariants-vs-policy)
 - [Install](#install)
@@ -196,6 +197,13 @@ Design notes that matter:
 - **`slug()` deduplicates natural-language ids.** Two strings that slugify the
   same become the same node — the load-bearing trick for turning prose concepts
   into stable ids.
+- **Ids are CURIEs.** `person:ada-lovelace`, `company:apple` — a compact URI:
+  `prefix:reference`, where the prefix is a short stable type token and the
+  reference is slugged (`slug(name, prefix="person")` mints them). It stays a
+  plain string today and expands to a full IRI *only* the day you publish to the
+  linked-data world, so interop is a cheap, additive option rather than a tax
+  paid up front. The id is an *address*, not a record: identity goes in the id,
+  changeable facts go in properties.
 
 A sixth table, `graph_events`, holds the append-only history (see below). It
 shares the same file and connection.
@@ -240,6 +248,68 @@ test) takes effect across every door at once.
 > The library also has a **direct, fast, unlogged** path (`g.add_node(...)`,
 > `g.add_nodes(...)`). It's the right tool for bulk loading, but those writes
 > are not in the event log — see the warning under *Event sourcing*.
+
+---
+
+## Many ontologies: one control plane
+
+One graph is the *engine*. The **control plane** lets all three front doors
+address *many named ontologies* through that one engine — each its own SQLite
+file (and, when a workload earns it, its own engine entirely). You name an
+ontology; the resolver routes. Nothing else changes — the gate, the log, and the
+`service.py` write path are exactly the same; only *which* graph + log they act
+on is chosen by name.
+
+```mermaid
+flowchart TD
+    subgraph doors["front doors, now ontology-aware"]
+        CLI["kg --ontology coffee …"]
+        MCP["kg_node_get(ontology='coffee')"]
+        LIB["resolve('coffee')"]
+    end
+    RES["resolver.py<br/>name → (backend, events, entry)"]
+    IDX[["index.db<br/>the registry — itself a kg"]]
+    REG{"backend registry"}
+    SQ[("sqlite · live")]
+    PG[("postgres · stub")]
+    NEO[("neo4j · stub")]
+
+    CLI --> RES
+    MCP --> RES
+    LIB --> RES
+    RES -->|"look up the name"| IDX
+    RES -->|"open the engine"| REG
+    REG --> SQ
+    REG -.-> PG
+    REG -.-> NEO
+```
+
+- **The registry is itself a kg.** Ontologies are nodes in an index graph
+  (`<root>/index.db`), so *listing* them is a query and *registering* one is an
+  upsert — no new storage machinery. A database **of** databases.
+- **The default ontology is the legacy file.** Omit the name and you hit
+  `<root>/graph.db`, exactly as before. Multi-ontology is purely additive;
+  nothing moves, and every existing command behaves identically.
+- **Isolation is filesystem-shaped.** Each ontology is its own file with its own
+  event log. "Coffee doesn't know Ada" because they are different files — no
+  tenant ids, no row filtering, no leak surface.
+- **The engine is pluggable.** A backend is a factory registered under a name;
+  `sqlite` is live, `postgres` and `neo4j` are stubs that route and fail loudly
+  until built. Most ontologies stay embedded SQLite — the zero-dependency
+  default — while a specific heavy one can be **escalated** to a purpose-built
+  engine when its *workload* (not its row count) turns deep. Philosophy #6, "pay
+  for speed only when you ask," generalized from batching to whole engines.
+
+```bash
+kg ontology create coffee --stance inferential       # register (lands in index.db)
+kg ontology list                                     # the database of databases
+kg --ontology coffee node add drink:latte --kind Drink --name Latte
+kg --ontology coffee out drink:latte                 # scoped to that ontology
+```
+
+Two ways to target a graph, mirroring the MCP `ontology` argument: `--ontology
+NAME` routes through the resolver (named, registered, multi-engine), while
+`--db PATH` stays the raw escape hatch onto one exact file, registry untouched.
 
 ---
 
@@ -428,11 +498,17 @@ kg revert <event-id>              # undo a mutation (compensating event)
 kg replay                         # rebuild the projection from the log
 
 kg import graph.json              # bulk {nodes, edges} import (gated + logged)
+
+kg ontology create coffee --stance inferential   # register a named ontology
+kg ontology list                  # the registry (database of databases)
+kg --ontology coffee node add drink:latte --kind Drink   # route to it
 kg serve                          # launch the MCP server (needs [mcp])
 ```
 
 `--prop key=value` values are parsed as JSON when possible (`born=1815` → int,
 `ok=true` → bool, `tags='["a"]'` → list) and kept as a plain string otherwise.
+Target a named ontology with `--ontology NAME` (routed through the resolver, default:
+the default ontology); `--db PATH` is the raw escape hatch onto one exact file.
 Exit codes: `0` ok · `1` not found / bad input · `2` policy denial · `3`
 invariant violation.
 
@@ -454,7 +530,9 @@ It exposes `kg_`-prefixed tools for reads (`kg_node_get`, `kg_nodes_by_kind`,
 (`kg_node_upsert`, `kg_edge_add`, `kg_node_delete`, …), and the event log
 (`kg_events_tail`, `kg_event_revert`, `kg_replay`). Every write passes through
 the invariants + policy gate and is recorded — same engine, same file as the
-CLI.
+CLI. Every tool also takes an optional `ontology` name (omit for the default),
+and `kg_ontologies_list` / `kg_ontology_create` manage the registry — so an
+agent can discover, create, and route between ontologies entirely over MCP.
 
 ---
 
@@ -560,10 +638,13 @@ measured ours, and you can [measure yours](bench/neo4j/README.md).
 | `kg revert EVENT_ID`            | undo an event (compensating event)            |
 | `kg replay [--upto TS]`         | rebuild the projection from the log           |
 | `kg import FILE`                | bulk `{nodes, edges}` import (gated + logged) |
+| `kg ontology list`              | list registered ontologies (the registry)     |
+| `kg ontology create NAME …`     | register an ontology (`--backend`, `--stance`) |
 | `kg serve [--transport T]`      | run the MCP server                            |
 
-Add `--json` to any command for machine-readable output; `--db PATH` to target
-a specific database.
+Add `--json` to any command for machine-readable output. Target a graph with
+`--ontology NAME` (routed through the resolver; default: the default ontology)
+or `--db PATH` (the raw escape hatch onto one exact file, registry bypassed).
 
 ---
 
@@ -576,12 +657,18 @@ kgrdbms/
 ├── policy.py       # configurable mutation policy (permissive by default)
 ├── invariants.py   # compiled-in invariants, checked before policy (no-op default)
 ├── service.py      # the shared gated + logged write path
+├── resolver.py     # control plane: ontology name → (backend, events, entry) + the index
+├── backends/       # pluggable engine registry
+│   ├── base.py     #   GraphBackend protocol + raising stub skeleton
+│   ├── sqlite.py   #   live engine (adapter over Graph)
+│   └── postgres.py, neo4j.py   # stubs (scale-up / deep-traversal escalation)
 ├── cli.py          # the `kg` command (stdlib argparse)
 └── mcp_server.py   # the MCP server (optional [mcp] extra)
 ```
 
 `graph.py` imports nothing internal — it's a usable, dependency-free LPG on its
-own. Everything else layers on top.
+own. Everything else layers on top; `service.py` depends only on the
+`GraphBackend` protocol, never a concrete engine.
 
 ---
 

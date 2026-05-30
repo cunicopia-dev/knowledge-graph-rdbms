@@ -8,8 +8,13 @@ means every mutation passes the invariants + policy gate and is recorded to
 the append-only event log — exactly like the MCP server. So `kg replay` and
 `kg revert` keep working, and a custom policy is honored at the console too.
 
-Storage: ~/.kgrdbms/graph.db, or set KGRDBMS_HOME, or pass --db PATH.
-Add --json to any command to get machine-readable output for piping.
+Targeting a graph (two ways, same as the MCP server's `ontology` argument):
+  * --ontology NAME routes through the resolver (named, registered, multi-engine).
+    Omit it and you hit the default ontology (the legacy $KGRDBMS_HOME/graph.db).
+  * --db PATH is the raw escape hatch: open that exact file directly, no registry.
+
+Storage root: ~/.kgrdbms, or set KGRDBMS_HOME. `kg ontology list/create` manage
+the registry. Add --json to any command for machine-readable output.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import json
 import sys
 from typing import Any
 
-from kgrdbms import __version__, service
+from kgrdbms import __version__, resolver, service
 from kgrdbms.events import EventLog
 from kgrdbms.graph import Edge, Graph, Node
 from kgrdbms.invariants import InvariantViolation
@@ -78,21 +83,60 @@ def _fmt_node(n: Node) -> str:
 
 
 class App:
-    """Holds the open graph/log and the chosen output mode for a single run."""
+    """Holds the graph/log target and output mode for a single run.
 
-    def __init__(self, db: str | None, as_json: bool) -> None:
-        self.graph = Graph(path=db) if db else Graph()
-        self._events: EventLog | None = None
+    Opening is lazy: registry-only commands (`ontology list`) never touch a
+    graph. `--db PATH` opens that exact file directly (escape hatch); otherwise
+    the resolver routes `--ontology NAME` (or the default) to its backend + log.
+    """
+
+    def __init__(self, db: str | None, ontology: str | None, as_json: bool) -> None:
+        self._db = db
+        self._ontology = ontology
         self.as_json = as_json
+        self._graph: Any = None
+        self._events: EventLog | None = None
+        self._db_path: str | None = None
+        self._ont_name: str | None = None
+
+    def _ensure(self) -> None:
+        if self._graph is not None:
+            return
+        if self._db:  # raw escape hatch: exact file, no registry
+            self._graph = Graph(path=self._db)
+            self._db_path = self._db
+        else:  # route a name (or the default) through the control plane
+            resolved = resolver.resolve(self._ontology)
+            self._graph = resolved.backend
+            self._events = resolved.events
+            self._db_path = resolved.entry.path
+            self._ont_name = resolved.entry.name
+
+    @property
+    def graph(self) -> Any:
+        self._ensure()
+        return self._graph
 
     @property
     def events(self) -> EventLog:
+        self._ensure()
         if self._events is None:
-            self._events = EventLog(self.graph)
+            self._events = EventLog(self._graph)
         return self._events
 
+    @property
+    def db_path(self) -> str:
+        self._ensure()
+        return self._db_path  # type: ignore[return-value]
+
+    @property
+    def ontology(self) -> str | None:
+        self._ensure()
+        return self._ont_name
+
     def close(self) -> None:
-        self.graph.close()
+        if self._graph is not None:
+            self._graph.close()
 
     def emit(self, obj: Any, human: str | None = None) -> None:
         """Print a result: JSON when --json, otherwise the human rendering."""
@@ -109,19 +153,50 @@ class App:
 
 def cmd_stats(app: App, args) -> int:
     res = {
+        "ontology": app.ontology,
         "nodes_total": app.graph.total_nodes(),
         "edges_total": app.graph.total_edges(),
         "nodes_by_kind": app.graph.count_nodes_by_kind(),
         "edges_by_type": app.graph.count_edges_by_type(),
-        "db_path": str(app.graph.path),
+        "db_path": app.db_path,
     }
+    ont = f"ontology: {res['ontology']}\n" if res["ontology"] else ""
     human = (
+        f"{ont}"
         f"db: {res['db_path']}\n"
         f"nodes: {res['nodes_total']:,}   edges: {res['edges_total']:,}\n"
         f"by kind: {res['nodes_by_kind'] or '{}'}\n"
         f"by type: {res['edges_by_type'] or '{}'}"
     )
     app.emit(res, human)
+    return 0
+
+
+# ---- registry handlers (the control plane / db-of-dbs) ---------------
+
+
+def _ontology_dict(e) -> dict:
+    return {"name": e.name, "backend": e.backend, "stance": e.stance,
+            "description": e.description, "path": e.path}
+
+
+def cmd_ontology_list(app: App, args) -> int:
+    ents = resolver.list_ontologies()
+    human = "\n".join(
+        f"{e.name:16} {e.backend:8} {e.stance:12} {e.path}" for e in ents
+    ) or "(no ontologies registered yet)"
+    app.emit([_ontology_dict(e) for e in ents], human)
+    return 0
+
+
+def cmd_ontology_create(app: App, args) -> int:
+    entry = resolver.register(
+        args.name, backend=args.backend, description=args.description or "", stance=args.stance
+    )
+    app.emit(
+        _ontology_dict(entry),
+        f"registered ontology {entry.name!r} (backend={entry.backend}, stance={entry.stance})\n{entry.path}",
+    )
     return 0
 
 
@@ -313,12 +388,24 @@ def cmd_serve(app: App, args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kg", description="Command-line interface to a kgrdbms graph.")
     p.add_argument("--version", action="version", version=f"kgrdbms {__version__}")
-    p.add_argument("--db", help="path to the graph database file (default: $KGRDBMS_HOME/graph.db)")
+    p.add_argument("--ontology", help="named ontology to target via the resolver (default: the default ontology)")
+    p.add_argument("--db", help="raw escape hatch: open this exact db file directly, bypassing the registry")
     p.add_argument("--json", dest="as_json", action="store_true", help="emit JSON instead of text")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("stats", help="node/edge counts and db path")
+    sp = sub.add_parser("stats", help="node/edge counts, db path, active ontology")
     sp.set_defaults(func=cmd_stats)
+
+    # ---- ontology registry (the db-of-dbs) ----
+    ont = sub.add_parser("ontology", help="manage the ontology registry").add_subparsers(dest="action", required=True)
+    a = ont.add_parser("list", help="list registered ontologies")
+    a.set_defaults(func=cmd_ontology_list)
+    a = ont.add_parser("create", help="register a new ontology (name, backend, opinion)")
+    a.add_argument("name")
+    a.add_argument("--backend", default="sqlite", help="engine: sqlite (live) | postgres | neo4j (stubs)")
+    a.add_argument("--description", default="")
+    a.add_argument("--stance", default="literal", help="extraction opinion: literal | inferential | ...")
+    a.set_defaults(func=cmd_ontology_create)
 
     # ---- node group ----
     node = sub.add_parser("node", help="node operations").add_subparsers(dest="action", required=True)
@@ -438,7 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    app = App(db=args.db, as_json=args.as_json)
+    app = App(db=args.db, ontology=getattr(args, "ontology", None), as_json=args.as_json)
     try:
         return args.func(app, args)
     except InvariantViolation as e:
@@ -447,6 +534,9 @@ def main(argv: list[str] | None = None) -> int:
     except PermissionError as e:
         print(f"refused (policy): {e}", file=sys.stderr)
         return 2
+    except NotImplementedError as e:
+        print(f"unavailable: {e}", file=sys.stderr)
+        return 1
     except (KeyError, ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
