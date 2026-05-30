@@ -1,23 +1,46 @@
 # knowledge-graph-rdbms
 
-**A lightweight, transparent, event-sourced knowledge graph that lives in a single SQLite file.**
+![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
+![tests: 54 passing](https://img.shields.io/badge/tests-54_passing-brightgreen)
+![storage: SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
-No graph database. No Cypher. No server, no JVM, no Docker. Five tables, a
-small Python API, and — if you want it — an [MCP](https://modelcontextprotocol.io)
+**A knowledge graph for modeling _meaning_ — entities, the kinds of things they
+are, and the relationships between them — in a single SQLite file.**
+
+No graph database. No Cypher. No server, no JVM, no Docker. Five tables, a small
+Python API, and — when you want them — an [MCP](https://modelcontextprotocol.io)
 server and a `kg` command line. The core library has **zero third-party
 dependencies**.
 
 > Python 3.10+ · MIT · zero-dependency core · library + CLI + MCP
 
-This is a niche tool, not a product. It exists for people who want a knowledge
-graph backend they can fully understand, embed anywhere, and reason about — and
-who don't want to stand up Neo4j to store a few hundred thousand facts.
+The world isn't rows in a table — it's *things*, the kinds of things they are,
+and how they relate. A label property graph captures exactly that, and not much
+more: **nodes** (entities), **typed edges** (relationships), **labels** (sets),
+and **JSON properties** (everything else). There's no schema to design up front;
+meaning accretes as facts, and the shape stays as flexible as the domain it
+describes.
+
+That flexibility is what makes it a natural substrate for **AI agents**. Hand an
+agent an MCP connection to this graph and it can do what agents are uniquely good
+at: read a domain, model what it learns, connect ideas, and reason over
+*structure* instead of prose. Every write is gated, attributed, and appended to
+an event log — so an agent can reshape the graph freely while you keep the
+receipts: audit it, replay it to any point in time, or roll a change back with
+one command. A memory that records *why*, not just *what* — in one embeddable
+file that travels wherever the agent runs: a laptop, a CI job, a serverless
+function, a Pi.
+
+Small enough to hold in your head. Flexible enough to model anything.
 
 ---
 
 ## Contents
 
-- [Is this for you?](#is-this-for-you)
+- [Where it fits](#where-it-fits)
 - [The idea in 30 seconds](#the-idea-in-30-seconds)
 - [Design philosophy](#design-philosophy)
 - [The data model](#the-data-model)
@@ -437,32 +460,50 @@ CLI.
 
 ## Performance
 
-Numbers below are from `bench/benchmark.py` on Apple Silicon with SQLite in WAL
-mode — illustrative, not a guarantee. It reports full distributions (p50–p99),
-not single shots; run it on your machine. The shape is what matters.
+All figures come from `bench/benchmark.py`, which reports full distributions
+(p50–p99), not single shots — and the charts below are rendered straight from
+that data by `bench/charts.py`. Run both on your own machine in one command.
+(Shown: Apple Silicon, CPython 3.14, SQLite 3.50 — illustrative, not a promise.)
 
-| Operation                          | Throughput       |
-| ---------------------------------- | ---------------- |
-| `node(id)` point lookup            | ~113,000 / s     |
-| `out()` traversal                  | ~82,000 / s      |
-| `shortest_path` (1,000 hops)       | ~18 ms           |
-| `add_node` (default, commit/call)  | ~17,000 / s      |
-| `add_node` inside `batch()`        | ~161,000 / s     |
-| `add_nodes([...])` bulk            | ~202,000 / s     |
-| `add_edges([...])` bulk            | ~144,000 / s     |
+| Operation                       | Throughput     |
+| ------------------------------- | -------------- |
+| `node(id)` point lookup         | ~120,000 / s   |
+| `add_node` (per-call, durable)  | ~17,000 / s    |
+| `add_node` inside `batch()`     | ~157,000 / s   |
+| `add_nodes([...])` bulk         | ~189,000 / s   |
+| `replay()` (events/sec)         | ~26,000 / s    |
 
-Two things worth knowing:
+### Writes — the batching lever
 
-- **Durable by default, fast on demand.** Each single write commits on its own
-  for durability (~15–20k writes/s). When you're loading in bulk, `batch()` /
-  `add_nodes` / `add_edges` collapse those commits into one transaction for an
-  ~10× jump (~150–200k writes/s) — same engine, you just tell it a batch is
-  coming.
-- **Multi-node reads stay flat.** `nodes_by_kind`, `nodes_by_label`,
-  `descendants`, `neighborhood`, and `out()`/`in_()` hydrate labels and
-  properties for the whole result set in a constant number of queries rather
-  than two per row, so a 20k-node read doesn't fan out into 40k follow-up
-  queries.
+![Write throughput — batch the commit, ~10× faster](assets/write_throughput.png)
+
+Each single write commits on its own for durability. Wrapping a bulk load in
+`batch()` / `add_nodes` / `add_edges` collapses those per-call commits into one
+transaction for an ~10× jump — same engine, you just tell it a batch is coming.
+The gated + logged path (what the CLI and MCP server use) adds the
+invariants+policy check and an event record per write, and still clears tens of
+thousands per second.
+
+### Reads — fast, with an honest tail
+
+![Read latency — p50 marker, whisker to p99, log scale](assets/read_latency.png)
+
+Point lookups land in single-digit microseconds, and multi-node reads hydrate
+the whole result set in a constant number of queries (no N+1 fan-out). The chart
+plots p50 → p99 on purpose: randomized `shortest_path` endpoints make some walks
+short and some span the whole chain, and an average would bury that tail.
+
+### A note on the runtime
+
+kgrdbms is Python, and for performance that's a deliberate non-issue: the same
+SQLite engine runs under CPython, Node, and Bun, so the gap between them is pure
+binding overhead — under 2×, and it doesn't even favor one runtime across
+operations.
+
+![Same SQLite across CPython, Node, and Bun](assets/runtimes.png)
+
+The lever that actually moved the needle was transaction batching (~10×, above),
+not the language. Reproduce it with `python bench/runtimes/compare.py`.
 
 ### Where the curve bends
 
