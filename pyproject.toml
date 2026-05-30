@@ -23,6 +23,7 @@ mcp = ["mcp>=1.0"]
 dev = ["pytest>=7.0", "mcp>=1.0"]
 
 [project.scripts]
+kg = "kgrdbms.cli:main"
 kgrdbms-mcp = "kgrdbms.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]

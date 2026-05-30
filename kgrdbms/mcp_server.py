@@ -42,21 +42,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kgrdbms.events import (
-    EventLog,
-    OP_EDGE_ADD,
-    OP_EDGE_REMOVE,
-    OP_NODE_DELETE,
-    OP_NODE_SET_LABEL,
-    OP_NODE_SET_PROPERTY,
-    OP_NODE_UPSERT,
-    edge_spec,
-    node_spec,
-    replay,
-)
+from kgrdbms import service
+from kgrdbms.events import EventLog
 from kgrdbms.graph import Edge, Graph, Node
-from kgrdbms.invariants import InvariantViolation, enforce
-from kgrdbms.policy import Decision, MutationContext, mutation_check
 
 
 # ---- process-lifetime singletons ------------------------------------
@@ -102,29 +90,6 @@ def _edge_to_dict(e: Edge) -> dict:
         "type": e.type,
         "properties": e.properties,
     }
-
-
-def _guard(ctx: MutationContext) -> None:
-    """The gate. Invariants (compiled-in, no off switch) run BEFORE policy.
-
-    An InvariantViolation cannot be configured away — it is mechanism, not
-    policy. Only if it passes do we consult the configurable policy hook.
-    """
-    enforce(_GRAPH, ctx)  # raises InvariantViolation on a sealed mutation
-    decision: Decision = mutation_check(ctx)
-    if not decision.allowed:
-        raise PermissionError(f"mutation denied by policy: {decision.reason}")
-
-
-def _node_ctx(node_id: str, operation) -> MutationContext:
-    """Snapshot a node's kind/labels for a gate decision before we mutate it."""
-    n = _GRAPH.node(node_id)
-    return MutationContext(
-        operation=operation,
-        node_id=node_id,
-        node_kind=n.kind if n else None,
-        node_labels=frozenset(n.labels) if n else frozenset(),
-    )
 
 
 # =====================================================================
@@ -226,40 +191,22 @@ def kg_node_upsert(
     Gated by invariants then policy. Logged as a reversible NODE_UPSERT event
     (the node's prior state is captured so the upsert can be compensated).
     """
-    ctx = MutationContext(
-        operation="node_upsert",
-        node_id=id,
-        node_kind=kind,
-        node_labels=frozenset(labels or []),
+    node = service.upsert_node(
+        _GRAPH, _EVENTS, id=id, kind=kind, name=name, labels=labels, properties=properties, actor=actor
     )
-    _guard(ctx)
-    prior = _GRAPH.node(id)
-    prior_spec = node_spec(prior) if prior else None
-    node = _GRAPH.add_node(id=id, kind=kind, name=name, labels=labels or [], properties=properties or {})
-    _EVENTS.record(actor, OP_NODE_UPSERT, {"after": node_spec(node), "prior": prior_spec})
     return _node_to_dict(node)  # type: ignore[return-value]
 
 
 @mcp.tool()
 def kg_node_set_label(id: str, label: str, actor: str = "anonymous") -> dict | None:
     """Add a label to an existing node. Logged + reversible."""
-    _guard(_node_ctx(id, "node_set_label"))
-    _GRAPH.add_label(id, label)
-    _EVENTS.record(actor, OP_NODE_SET_LABEL, {"id": id, "label": label})
-    return _node_to_dict(_GRAPH.node(id))
+    return _node_to_dict(service.set_label(_GRAPH, _EVENTS, id, label, actor=actor))
 
 
 @mcp.tool()
 def kg_node_set_property(id: str, key: str, value: Any, actor: str = "anonymous") -> dict | None:
     """Set a single property on a node. Value must be JSON-serializable. Logged + reversible."""
-    ctx = _node_ctx(id, "node_set_property")
-    ctx.property_key = key
-    _guard(ctx)
-    prior_node = _GRAPH.node(id)
-    prior_value = prior_node.properties.get(key, {"__missing__": True}) if prior_node else {"__missing__": True}
-    _GRAPH.set_property(id, key, value)
-    _EVENTS.record(actor, OP_NODE_SET_PROPERTY, {"id": id, "key": key, "value": value, "prior": prior_value})
-    return _node_to_dict(_GRAPH.node(id))
+    return _node_to_dict(service.set_property(_GRAPH, _EVENTS, id, key, value, actor=actor))
 
 
 @mcp.tool()
@@ -269,15 +216,7 @@ def kg_node_delete(id: str, actor: str = "anonymous") -> dict:
     Captures the full node + its incident edges in the event so the delete can
     be compensated (restored) later.
     """
-    _guard(_node_ctx(id, "node_delete"))
-    node = _GRAPH.node(id)
-    if node is None:
-        return {"deleted": False, "id": id}
-    captured_node = node_spec(node)
-    captured_edges = [edge_spec(e) for e in _GRAPH.incident_edges(id)]
-    existed = _GRAPH.delete_node(id)
-    _EVENTS.record(actor, OP_NODE_DELETE, {"node": captured_node, "edges": captured_edges})
-    return {"deleted": existed, "id": id, "edges_removed": len(captured_edges)}
+    return service.delete_node(_GRAPH, _EVENTS, id, actor=actor)
 
 
 @mcp.tool()
@@ -289,38 +228,14 @@ def kg_edge_add(
     actor: str = "anonymous",
 ) -> dict:
     """Add an edge. Triples (from, type, to) are unique; repeats update properties."""
-    ctx = MutationContext(
-        operation="edge_add",
-        edge_type=type,
-        from_node_id=from_id,
-        to_node_id=to_id,
-    )
-    _guard(ctx)
-    edge = _GRAPH.add_edge(from_node=from_id, to_node=to_id, type=type, properties=properties or {})
-    _EVENTS.record(actor, OP_EDGE_ADD, {"edge": edge_spec(edge)})
+    edge = service.add_edge(_GRAPH, _EVENTS, from_id, to_id, type, properties=properties, actor=actor)
     return _edge_to_dict(edge)
 
 
 @mcp.tool()
 def kg_edge_remove(from_id: str, to_id: str, type: str, actor: str = "anonymous") -> dict:
     """Remove a specific edge by (from, type, to). Idempotent. Logged + reversible."""
-    ctx = MutationContext(
-        operation="edge_remove",
-        edge_type=type,
-        from_node_id=from_id,
-        to_node_id=to_id,
-    )
-    _guard(ctx)
-    # Capture the edge (with its properties) before removal so it can be restored.
-    captured = None
-    for e, _n in _GRAPH.out(from_id, type):
-        if e.to_node == to_id:
-            captured = edge_spec(e)
-            break
-    removed = _GRAPH.delete_edge(from_id, to_id, type)
-    if removed:
-        _EVENTS.record(actor, OP_EDGE_REMOVE, {"edge": captured or {"from": from_id, "to": to_id, "type": type, "properties": {}}})
-    return {"removed": removed, "from": from_id, "type": type, "to": to_id}
+    return service.remove_edge(_GRAPH, _EVENTS, from_id, to_id, type, actor=actor)
 
 
 # ---- event log: read + reversal + replay ----------------------------
@@ -335,8 +250,7 @@ def kg_events_tail(n: int = 20) -> list[dict]:
 @mcp.tool()
 def kg_event_revert(event_id: str, actor: str = "operator") -> dict:
     """Reverse an event by emitting a compensating event. The original is never deleted."""
-    comp = _EVENTS.compensate(event_id, actor=actor)
-    return comp.to_dict()
+    return service.revert_event(_EVENTS, event_id, actor=actor).to_dict()
 
 
 @mcp.tool()
@@ -346,7 +260,7 @@ def kg_replay(upto_ts: str | None = None) -> dict:
     With upto_ts (ISO 8601) the graph is projected to that point in time. The
     event log is never cleared.
     """
-    return replay(_GRAPH, _EVENTS, upto_ts=upto_ts)
+    return service.replay_log(_GRAPH, _EVENTS, upto_ts=upto_ts)
 
 
 # =====================================================================

@@ -116,7 +116,9 @@ def test_default_policy_is_permissive(mcp_mod):
 def test_policy_denial_raises_permission_error(mcp_mod, monkeypatch):
     from kgrdbms.policy import Decision
 
-    monkeypatch.setattr(mcp_mod, "mutation_check", lambda ctx: Decision.deny("sealed"))
+    # The service gate resolves mutation_check through the policy module, so
+    # patching it there affects every write path (MCP and CLI alike).
+    monkeypatch.setattr("kgrdbms.policy.mutation_check", lambda ctx: Decision.deny("sealed"))
     with pytest.raises(PermissionError):
         mcp_mod.kg_node_upsert(id="blocked:1", kind="X", name="x")
 
@@ -128,7 +130,7 @@ def test_invariant_violation_runs_before_policy(mcp_mod, monkeypatch):
         if ctx.operation == "node_delete" and ctx.node_kind == "Root":
             raise InvariantViolation("root is the floor")
 
-    monkeypatch.setattr(mcp_mod, "enforce", seal)
+    monkeypatch.setattr("kgrdbms.invariants.enforce", seal)
     mcp_mod.kg_node_upsert(id="root:1", kind="Root", name="root")
     with pytest.raises(InvariantViolation):
         mcp_mod.kg_node_delete("root:1")

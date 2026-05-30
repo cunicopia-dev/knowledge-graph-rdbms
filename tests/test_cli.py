@@ -1,0 +1,149 @@
+"""CLI tests: invoke main(argv) directly, assert on output, exit codes, and
+the resulting graph state. Writes must be gated AND logged."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from kgrdbms.cli import main
+from kgrdbms.graph import Graph
+
+
+@pytest.fixture
+def db(tmp_path):
+    return str(tmp_path / "cli.db")
+
+
+def run(db, *argv, as_json=False):
+    args = ["--db", db]
+    if as_json:
+        args.append("--json")
+    return main(args + list(argv))
+
+
+# ---- basic round trips ----------------------------------------------
+
+
+def test_node_add_then_get(db, capsys):
+    assert run(db, "node", "add", "person:ada", "--kind", "Person", "--name", "Ada") == 0
+    capsys.readouterr()
+    assert run(db, "node", "get", "person:ada") == 0
+    out = capsys.readouterr().out
+    assert "person:ada" in out and "Ada" in out
+
+
+def test_prop_values_parse_as_json_then_string(db, capsys):
+    run(db, "node", "add", "n:1", "--kind", "K",
+        "--prop", "born=1815", "--prop", "ok=true",
+        "--prop", "tags=[\"a\",\"b\"]", "--prop", "name=Ada")
+    run(db, "node", "get", "n:1", )  # ensure committed
+    capsys.readouterr()
+    assert run(db, "node", "get", "n:1", as_json=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    props = payload["properties"]
+    assert props["born"] == 1815 and isinstance(props["born"], int)
+    assert props["ok"] is True
+    assert props["tags"] == ["a", "b"]
+    assert props["name"] == "Ada"  # not valid JSON -> kept as string
+
+
+def test_missing_node_get_exits_1(db, capsys):
+    assert run(db, "node", "get", "nope") == 1
+
+
+# ---- writes are logged (the whole reason for log+gate) ---------------
+
+
+def test_writes_are_logged_and_survive_replay(db, capsys):
+    run(db, "node", "add", "a", "--kind", "K")
+    run(db, "node", "add", "b", "--kind", "K")
+    run(db, "edge", "add", "a", "b", "REL")
+    capsys.readouterr()
+
+    # the log has the three mutations
+    assert run(db, "events", "-n", "10", as_json=True) == 0
+    ops = [e["op"] for e in json.loads(capsys.readouterr().out)]
+    assert ops == ["NODE_UPSERT", "NODE_UPSERT", "EDGE_ADD"]
+
+    # replay rebuilds purely from the log; logged writes survive
+    assert run(db, "replay") == 0
+    capsys.readouterr()
+    g = Graph(path=db)
+    assert g.node("a") is not None and g.node("b") is not None
+    assert g.out("a", "REL")
+    g.close()
+
+
+def test_revert_undoes_a_logged_write(db, capsys):
+    run(db, "node", "add", "tmp", "--kind", "K")
+    capsys.readouterr()
+    run(db, "events", "-n", "1", as_json=True)
+    ev_id = json.loads(capsys.readouterr().out)[0]["id"]
+    assert run(db, "revert", ev_id) == 0
+    g = Graph(path=db)
+    assert g.node("tmp") is None
+    g.close()
+
+
+# ---- edges / traversal ----------------------------------------------
+
+
+def test_edge_add_rm_and_path(db, capsys):
+    run(db, "node", "add", "x", "--kind", "K")
+    run(db, "node", "add", "y", "--kind", "K")
+    run(db, "edge", "add", "x", "y", "REL")
+    capsys.readouterr()
+    assert run(db, "path", "x", "y") == 0
+    assert "x" in capsys.readouterr().out
+    assert run(db, "edge", "rm", "x", "y", "REL") == 0
+    assert run(db, "edge", "rm", "x", "y", "REL") == 1  # idempotent: nothing removed
+
+
+# ---- import ----------------------------------------------------------
+
+
+def test_import_is_gated_logged_and_replayable(db, tmp_path, capsys):
+    doc = {
+        "nodes": [{"id": "x:1", "kind": "X", "labels": ["L"]}, {"id": "x:2", "kind": "X"}],
+        "edges": [{"from": "x:1", "to": "x:2", "type": "REL", "properties": {"w": 0.5}}],
+    }
+    f = tmp_path / "imp.json"
+    f.write_text(json.dumps(doc))
+    assert run(db, "import", str(f)) == 0
+    capsys.readouterr()
+
+    g = Graph(path=db)
+    assert g.total_nodes() == 2 and g.total_edges() == 1
+    g.close()
+
+    # imported writes were logged -> they survive a replay
+    assert run(db, "replay") == 0
+    capsys.readouterr()
+    g = Graph(path=db)
+    assert g.out("x:1", "REL")[0][0].properties == {"w": 0.5}
+    g.close()
+
+
+# ---- gate surfaces cleanly -------------------------------------------
+
+
+def test_policy_denial_exits_2(db, capsys, monkeypatch):
+    from kgrdbms.policy import Decision
+
+    monkeypatch.setattr("kgrdbms.policy.mutation_check", lambda ctx: Decision.deny("nope"))
+    assert run(db, "node", "add", "blocked", "--kind", "K") == 2
+    assert "policy" in capsys.readouterr().err
+
+
+def test_invariant_violation_exits_3(db, capsys, monkeypatch):
+    from kgrdbms.invariants import InvariantViolation
+
+    def seal(graph, ctx):
+        if ctx.operation == "node_upsert" and ctx.node_kind == "Sealed":
+            raise InvariantViolation("sealed kind")
+
+    monkeypatch.setattr("kgrdbms.invariants.enforce", seal)
+    assert run(db, "node", "add", "x", "--kind", "Sealed") == 3
+    assert "invariant" in capsys.readouterr().err

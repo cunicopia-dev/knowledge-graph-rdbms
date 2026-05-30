@@ -123,6 +123,38 @@ guard every write:
 Invariants are checked **before** policy, so a policy can never re-open
 something an invariant has sealed.
 
+## Command line
+
+The `kg` command ships with the core install (stdlib `argparse`, no extra
+dependencies). Reads hit the graph directly; **writes go through the same
+gate + event log as the MCP server**, so `kg replay`/`kg revert` work and a
+custom policy is honored at the console too.
+
+```bash
+kg node add person:ada --kind Person --name "Ada Lovelace" \
+    --label Person --prop born=1815 --prop fields='["math","cs"]'
+kg node add field:cs --kind Field --name "Computer Science"
+kg edge add person:ada field:cs FOUNDED --prop year=1843
+
+kg out person:ada                 # outbound edges
+kg path person:ada field:cs       # shortest path
+kg nodes-by-kind Person
+kg stats
+kg --json node get person:ada     # machine-readable output for piping
+
+kg events -n 10                   # tail the event log
+kg revert <event-id>              # undo a mutation (compensating event)
+kg replay                         # rebuild the projection from the log
+
+kg import graph.json              # bulk {nodes, edges} import (gated + logged)
+kg serve                          # launch the MCP server (needs [mcp])
+```
+
+Property values (`--prop key=value`) are parsed as JSON when possible
+(`born=1815` → int, `ok=true` → bool, `tags='["a"]'` → list) and kept as a
+plain string otherwise. Exit codes: `0` ok, `1` not found / bad input,
+`2` policy denial, `3` invariant violation.
+
 ## MCP server
 
 ```bash
