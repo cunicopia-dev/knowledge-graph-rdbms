@@ -137,6 +137,56 @@ def slug(text: str, *, prefix: str | None = None) -> str:
     return f"{prefix}:{s}" if prefix else s
 
 
+# ---- bulk helpers ----------------------------------------------------
+
+# Keep IN(...) parameter lists comfortably under SQLite's variable limit
+# (999 on older builds), independent of the SQLite version in use.
+_IN_CHUNK = 900
+
+
+def _chunks(seq: list, size: int = _IN_CHUNK) -> Iterator[list]:
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def _normalize_node(spec: "Node | dict") -> tuple[str, str, str, list[str], dict[str, Any]]:
+    """Coerce a node spec (Node or dict) to (id, kind, name, labels, properties)."""
+    if isinstance(spec, Node):
+        return spec.id, spec.kind, spec.name or spec.id, list(spec.labels), dict(spec.properties)
+    if isinstance(spec, dict):
+        nid = spec["id"]
+        return (
+            nid,
+            spec["kind"],
+            spec.get("name") or nid,
+            list(spec.get("labels", [])),
+            dict(spec.get("properties", {})),
+        )
+    raise TypeError(f"node spec must be a Node or dict, got {type(spec).__name__}")
+
+
+def _normalize_edge(spec: "Edge | dict | tuple | list") -> tuple[str, str, str, dict[str, Any]]:
+    """Coerce an edge spec to (from, to, type, properties).
+
+    Accepts an Edge, a dict ({"from","to","type","properties"} — also tolerates
+    "from_node"/"to_node"), or a (from, to, type[, properties]) tuple/list.
+    """
+    if isinstance(spec, Edge):
+        return spec.from_node, spec.to_node, spec.type, dict(spec.properties)
+    if isinstance(spec, dict):
+        return (
+            spec.get("from", spec.get("from_node")),
+            spec.get("to", spec.get("to_node")),
+            spec["type"],
+            dict(spec.get("properties", {})),
+        )
+    if isinstance(spec, (tuple, list)) and len(spec) in (3, 4):
+        f, t, typ = spec[0], spec[1], spec[2]
+        props = dict(spec[3] or {}) if len(spec) == 4 else {}
+        return f, t, typ, props
+    raise TypeError("edge spec must be an Edge, dict, or (from, to, type[, properties]) tuple")
+
+
 # ---- graph ----------------------------------------------------------
 
 
@@ -154,6 +204,7 @@ class Graph:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        self._batch_depth = 0  # >0 means commits are deferred until the batch exits
         self.conn.commit()
 
     # ---- lifecycle -------------------------------------------------
@@ -170,15 +221,55 @@ class Graph:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    def _maybe_commit(self) -> None:
+        """Commit unless we are inside a batch (then the batch commits once)."""
+        if self._batch_depth == 0:
+            self.conn.commit()
+
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
-        """Explicit transaction wrapper. Commits on success, rolls back on raise."""
+        """Explicit transaction wrapper. Commits on success, rolls back on raise.
+
+        Inside a `batch()` block this defers to the batch: it yields without
+        committing, so the whole batch lands (or rolls back) atomically.
+        """
+        if self._batch_depth:
+            yield self.conn
+            return
         try:
             yield self.conn
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
+
+    @contextmanager
+    def batch(self) -> Iterator["Graph"]:
+        """Defer commits until the block exits — one commit for the whole block.
+
+        Every write method commits per call by default (one fsync each), which
+        is the right safe default but caps bulk throughput. Wrapping writes in a
+        `batch()` collapses them into a single transaction:
+
+            with g.batch():
+                for spec in millions:
+                    g.add_node(**spec)
+
+        Nestable; only the outermost block commits. Rolls back the whole block
+        on exception.
+        """
+        self._batch_depth += 1
+        try:
+            yield self
+        except Exception:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                self.conn.rollback()
+            raise
+        else:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                self.conn.commit()
 
     def clear(self) -> None:
         """Wipe the entire graph."""
@@ -216,8 +307,49 @@ class Graph:
                 "ON CONFLICT(node_id, key) DO UPDATE SET value_json=excluded.value_json",
                 (id, k, json.dumps(v)),
             )
-        self.conn.commit()
+        self._maybe_commit()
         return Node(id=id, kind=kind, name=name, labels=set(labels), properties=properties)
+
+    def add_nodes(self, specs: Iterable["Node | dict"]) -> int:
+        """Bulk insert/update nodes in a single transaction. Returns the count.
+
+        Each spec is a Node or a dict with `id` and `kind` (plus optional
+        `name`, `labels`, `properties`). Semantics match add_node — idempotent
+        on id, labels accumulate, properties upsert — but the whole batch
+        commits once via executemany instead of once per node.
+        """
+        node_rows: list[tuple[str, str, str]] = []
+        label_rows: list[tuple[str, str]] = []
+        prop_rows: list[tuple[str, str, str]] = []
+        count = 0
+        for spec in specs:
+            nid, kind, name, labels, props = _normalize_node(spec)
+            node_rows.append((nid, kind, name))
+            for label in set(labels):
+                label_rows.append((nid, label))
+            for k, v in props.items():
+                prop_rows.append((nid, k, json.dumps(v)))
+            count += 1
+        if not node_rows:
+            return 0
+        with self.tx():
+            self.conn.executemany(
+                "INSERT INTO nodes(id, kind, name) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, name=excluded.name",
+                node_rows,
+            )
+            if label_rows:
+                self.conn.executemany(
+                    "INSERT OR IGNORE INTO node_labels(node_id, label) VALUES (?, ?)",
+                    label_rows,
+                )
+            if prop_rows:
+                self.conn.executemany(
+                    "INSERT INTO node_properties(node_id, key, value_json) VALUES (?, ?, ?) "
+                    "ON CONFLICT(node_id, key) DO UPDATE SET value_json=excluded.value_json",
+                    prop_rows,
+                )
+        return count
 
     def add_label(self, node_id: str, *labels: str) -> None:
         with self.tx():
@@ -262,8 +394,45 @@ class Graph:
                 "ON CONFLICT(edge_id, key) DO UPDATE SET value_json=excluded.value_json",
                 (edge_id, k, json.dumps(v)),
             )
-        self.conn.commit()
+        self._maybe_commit()
         return Edge(id=edge_id, from_node=from_node, to_node=to_node, type=type, properties=props)
+
+    def add_edges(self, specs: Iterable["Edge | dict | tuple | list"]) -> int:
+        """Bulk add edges in a single transaction. Returns the number processed.
+
+        Each spec is an Edge, a dict ({"from","to","type","properties"}), or a
+        (from, to, type[, properties]) tuple. Triples (from, type, to) stay
+        unique: an existing triple is left in place and its properties upserted.
+        Both endpoint nodes must already exist (foreign keys are enforced).
+        """
+        edge_rows: list[tuple[str, str, str, str]] = []          # (id, from, to, type)
+        prop_rows: list[tuple[str, str, str, str, str]] = []     # (from, type, to, key, value_json)
+        count = 0
+        for spec in specs:
+            f, t, typ, props = _normalize_edge(spec)
+            edge_rows.append((uuid.uuid4().hex, f, t, typ))
+            for k, v in props.items():
+                prop_rows.append((f, typ, t, k, json.dumps(v)))
+            count += 1
+        if not edge_rows:
+            return 0
+        with self.tx():
+            # OR IGNORE: the unique triple index keeps the first id for a triple;
+            # a generated id for a triple that already exists is simply dropped.
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO edges(id, from_node, to_node, type) VALUES (?, ?, ?, ?)",
+                edge_rows,
+            )
+            if prop_rows:
+                # Resolve each triple to its actual edge id via a subquery so
+                # properties attach to the surviving row, not a dropped one.
+                self.conn.executemany(
+                    "INSERT INTO edge_properties(edge_id, key, value_json) VALUES "
+                    "((SELECT id FROM edges WHERE from_node=? AND type=? AND to_node=?), ?, ?) "
+                    "ON CONFLICT(edge_id, key) DO UPDATE SET value_json=excluded.value_json",
+                    prop_rows,
+                )
+        return count
 
     # ---- deletes / un-sets (single path; events + compensation reuse these) --
 
@@ -312,7 +481,7 @@ class Graph:
 
     def nodes_by_kind(self, kind: str) -> list[Node]:
         rows = self.conn.execute("SELECT * FROM nodes WHERE kind=? ORDER BY id", (kind,)).fetchall()
-        return [self._hydrate_node(r) for r in rows]
+        return self._hydrate_nodes(rows)
 
     def nodes_by_label(self, label: str) -> list[Node]:
         rows = self.conn.execute(
@@ -320,7 +489,7 @@ class Graph:
             "WHERE l.label = ? ORDER BY n.id",
             (label,),
         ).fetchall()
-        return [self._hydrate_node(r) for r in rows]
+        return self._hydrate_nodes(rows)
 
     def out(self, node_id: str, edge_type: str | None = None) -> list[tuple[Edge, Node]]:
         """Outbound edges and their target nodes."""
@@ -338,7 +507,7 @@ class Graph:
                 "WHERE e.from_node = ? ORDER BY e.type, n.id",
                 (node_id,),
             ).fetchall()
-        return [(self._hydrate_edge(r), self._hydrate_node_lite(r)) for r in rows]
+        return self._rows_to_edge_node_pairs(rows)
 
     def in_(self, node_id: str, edge_type: str | None = None) -> list[tuple[Edge, Node]]:
         """Inbound edges and their source nodes."""
@@ -356,32 +525,44 @@ class Graph:
                 "WHERE e.to_node = ? ORDER BY e.type, n.id",
                 (node_id,),
             ).fetchall()
-        return [(self._hydrate_edge(r), self._hydrate_node_lite(r)) for r in rows]
+        return self._rows_to_edge_node_pairs(rows)
 
     def neighborhood(self, node_id: str, depth: int = 1) -> dict[str, Node]:
-        """All nodes reachable from node_id within `depth` undirected hops (inclusive of self)."""
+        """All nodes reachable from node_id within `depth` undirected hops (inclusive of self).
+
+        BFS walks over ids only (cheap — out/in_ return lightweight target
+        nodes), then the whole reachable set is hydrated in one bulk pass rather
+        than re-fetching each node individually.
+        """
         depth = max(0, depth)
-        seen: dict[str, Node] = {}
-        root = self.node(node_id)
-        if not root:
-            return seen
-        seen[node_id] = root
+        if self.conn.execute("SELECT 1 FROM nodes WHERE id=?", (node_id,)).fetchone() is None:
+            return {}
+        seen_ids: set[str] = {node_id}
         frontier = {node_id}
         for _ in range(depth):
             next_frontier: set[str] = set()
             for nid in frontier:
                 for _, neighbor in self.out(nid):
-                    if neighbor.id not in seen:
-                        seen[neighbor.id] = self.node(neighbor.id) or neighbor
+                    if neighbor.id not in seen_ids:
+                        seen_ids.add(neighbor.id)
                         next_frontier.add(neighbor.id)
                 for _, neighbor in self.in_(nid):
-                    if neighbor.id not in seen:
-                        seen[neighbor.id] = self.node(neighbor.id) or neighbor
+                    if neighbor.id not in seen_ids:
+                        seen_ids.add(neighbor.id)
                         next_frontier.add(neighbor.id)
             frontier = next_frontier
             if not frontier:
                 break
-        return seen
+        rows: list[sqlite3.Row] = []
+        ids = list(seen_ids)
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" * len(chunk))
+            rows.extend(
+                self.conn.execute(
+                    f"SELECT * FROM nodes WHERE id IN ({placeholders})", chunk
+                ).fetchall()
+            )
+        return {n.id: n for n in self._hydrate_nodes(rows)}
 
     def shortest_path(self, from_id: str, to_id: str, max_depth: int = 8) -> list[Node] | None:
         """Undirected BFS. Returns the node sequence, or None if no path."""
@@ -459,6 +640,74 @@ class Graph:
         }
         return Node(id=nid, kind=row["kind"], name=row["name"], labels=labels, properties=props)
 
+    def _hydrate_nodes(self, rows: Iterable[sqlite3.Row]) -> list[Node]:
+        """Hydrate many node rows with two queries total instead of two per row.
+
+        The naive path fetches a node's labels and properties in a follow-up
+        query each — O(rows) round-trips (the N+1 problem). Here we fetch every
+        label and every property for the whole result set in two chunked IN()
+        queries, group them in Python, and assemble the Nodes in row order.
+        """
+        rows = list(rows)
+        if not rows:
+            return []
+        ids = [r["id"] for r in rows]
+        labels_by: dict[str, set[str]] = {nid: set() for nid in ids}
+        props_by: dict[str, dict[str, Any]] = {nid: {} for nid in ids}
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT node_id, label FROM node_labels WHERE node_id IN ({placeholders})",
+                chunk,
+            ):
+                labels_by[r["node_id"]].add(r["label"])
+            for r in self.conn.execute(
+                f"SELECT node_id, key, value_json FROM node_properties "
+                f"WHERE node_id IN ({placeholders})",
+                chunk,
+            ):
+                props_by[r["node_id"]][r["key"]] = json.loads(r["value_json"])
+        return [
+            Node(
+                id=r["id"],
+                kind=r["kind"],
+                name=r["name"],
+                labels=labels_by[r["id"]],
+                properties=props_by[r["id"]],
+            )
+            for r in rows
+        ]
+
+    def _rows_to_edge_node_pairs(self, rows: Iterable[sqlite3.Row]) -> list[tuple[Edge, Node]]:
+        """Build (Edge, lite Node) pairs from out()/in_() rows, bulk-fetching edge
+        properties in one query instead of one per edge."""
+        rows = list(rows)
+        if not rows:
+            return []
+        eids = [r["id"] for r in rows]
+        props_by: dict[str, dict[str, Any]] = {eid: {} for eid in eids}
+        for chunk in _chunks(eids):
+            placeholders = ",".join("?" * len(chunk))
+            for pr in self.conn.execute(
+                f"SELECT edge_id, key, value_json FROM edge_properties "
+                f"WHERE edge_id IN ({placeholders})",
+                chunk,
+            ):
+                props_by[pr["edge_id"]][pr["key"]] = json.loads(pr["value_json"])
+        return [
+            (
+                Edge(
+                    id=r["id"],
+                    from_node=r["from_node"],
+                    to_node=r["to_node"],
+                    type=r["type"],
+                    properties=props_by[r["id"]],
+                ),
+                Node(id=r["n_id"], kind=r["n_kind"], name=r["n_name"]),
+            )
+            for r in rows
+        ]
+
     @staticmethod
     def _hydrate_node_lite(row: sqlite3.Row) -> Node:
         return Node(id=row["n_id"], kind=row["n_kind"], name=row["n_name"])
@@ -497,4 +746,4 @@ class Graph:
             """,
             (node_id, edge_type, max_depth),
         ).fetchall()
-        return [self._hydrate_node(r) for r in rows]
+        return self._hydrate_nodes(rows)

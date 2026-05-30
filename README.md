@@ -51,6 +51,31 @@ with Graph(path="my.db") as g:
 Storage defaults to `~/.kgrdbms/graph.db`. Override with the `KGRDBMS_HOME`
 environment variable or by passing `path=` explicitly.
 
+## Bulk loading
+
+Every single write (`add_node`, `add_edge`) commits on its own — a safe
+default, but one fsync per call caps you at ~15k writes/s. For bulk work, opt
+into a single transaction and go ~10× faster:
+
+```python
+# Option A: bulk helpers (fastest — executemany under one commit)
+g.add_nodes([
+    {"id": "person:ada", "kind": "Person", "name": "Ada", "labels": ["Person"]},
+    {"id": "field:cs", "kind": "Field", "name": "Computer Science"},
+])
+g.add_edges([("person:ada", "field:cs", "FOUNDED")])  # or dicts / Edge objects
+
+# Option B: batch() context — defer commits for any mix of writes
+with g.batch():
+    for spec in millions_of_specs:
+        g.add_node(**spec)
+# one commit here; rolls back atomically on exception
+```
+
+Reads that return many nodes (`nodes_by_kind`, `nodes_by_label`,
+`descendants`, `neighborhood`) hydrate labels and properties for the whole
+result set in a constant number of queries rather than per-node.
+
 ## Event log: audit, undo, and time travel
 
 The graph you query is a *projection*. An optional append-only event log is
