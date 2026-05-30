@@ -437,8 +437,9 @@ CLI.
 
 ## Performance
 
-Numbers below are from `bench.py` on Apple Silicon with SQLite in WAL mode —
-illustrative, not a guarantee. The shape is what matters.
+Numbers below are from `bench/benchmark.py` on Apple Silicon with SQLite in WAL
+mode — illustrative, not a guarantee. It reports full distributions (p50–p99),
+not single shots; run it on your machine. The shape is what matters.
 
 | Operation                          | Throughput       |
 | ---------------------------------- | ---------------- |
@@ -542,8 +543,8 @@ own. Everything else layers on top.
 ```bash
 git clone <repo> && cd knowledge-graph-rdbms
 uv venv && uv pip install -e ".[dev]"
-pytest                 # 54 tests
-python bench.py        # performance probe
+pytest                       # 54 tests
+python bench/benchmark.py    # benchmark with p50–p99 (see bench/README.md)
 ```
 
 ---
