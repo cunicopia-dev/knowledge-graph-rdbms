@@ -93,6 +93,20 @@ def test_compensation_applies_to_postgres(pg):
     assert pg.backend.total_edges() == 0  # inverse event removed the row from postgres
 
 
+def test_bulk_add_nodes_and_edges(pg):
+    g = pg.backend
+    n = g.add_nodes([
+        {"id": "b:1", "kind": "T", "name": "1", "labels": ["X"], "properties": {"i": 1}},
+        {"id": "b:2", "kind": "T", "name": "2"},
+        {"id": "b:1", "kind": "T", "name": "1 again"},  # upsert, not duplicate
+    ])
+    assert n == 3 and g.total_nodes() == 2
+    assert g.node("b:1").name == "1 again" and g.node("b:1").properties == {"i": 1}
+    e = g.add_edges([("b:1", "b:2", "REL"), ("b:1", "b:2", "REL", {"w": 9})])
+    assert e == 2 and g.total_edges() == 1  # same triple collapses
+    assert g.out("b:1")[0][0].properties == {"w": 9}
+
+
 def test_replay_rebuilds_postgres_from_sqlite_log(pg):
     service.upsert_node(pg.backend, pg.events, id="p:1", kind="Person", name="One", actor="t")
     service.upsert_node(pg.backend, pg.events, id="p:2", kind="Person", name="Two", actor="t")

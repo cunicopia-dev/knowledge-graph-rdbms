@@ -1,12 +1,16 @@
 # Benchmarks
 
-Two things live here:
+What lives here:
 
 1. **`benchmark.py`** — the canonical benchmark of kgrdbms itself. Standard
    library only, so anyone with Python can run it on their own machine.
 2. **`runtimes/`** — an optional appendix that runs the *same raw SQLite*
    workload across CPython, Node, and Bun, to show how much the language
    runtime's binding actually costs (spoiler: less than you'd think).
+3. **`neo4j/`** and **`postgres/`** — head-to-head comparisons against the other
+   engines, same methodology. `postgres/` drives the live Postgres backend
+   through the same op suite to show the round-trip tax — and the one case (a
+   recursive CTE) where Postgres wins.
 
 All numbers are distributions — mean and p50/p90/p95/p99 — because a single
 timing is noise, not data.

@@ -626,6 +626,20 @@ turf; deep-traversal or pattern-heavy work is where a dedicated engine earns its
 complexity. The crossover is workload-shaped, not a single magic number — so we
 measured ours, and you can [measure yours](bench/neo4j/README.md).
 
+### SQLite vs the live Postgres engine
+
+Because `postgres` is a live backend, you can run the *same* op suite against
+both engines and watch the round-trip tax directly
+([`bench/postgres/`](bench/postgres/README.md)). Embedded SQLite wins the small,
+frequent ops by 30–60× — a point lookup is in-process, the Postgres one pays a
+localhost round-trip. The exception is the one deep traversal that runs as a
+single server-side query: the recursive-CTE `descendants` is where Postgres pulls
+*ahead* (~0.5×), while the per-hop-BFS `shortest_path` over the same chain is 67×
+slower — identical traversal, opposite verdict, decided entirely by how many
+times the work crosses the wire. Postgres earns its place on *concurrency and
+scale*, not single-thread latency; the control plane lets you escalate one
+ontology to it while the hot, shallow ones stay embedded.
+
 ---
 
 ## Command reference

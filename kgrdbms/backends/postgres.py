@@ -25,7 +25,7 @@ from typing import Any, Iterable, Iterator
 
 from kgrdbms.backends import backend
 from kgrdbms.backends.base import GraphBackend
-from kgrdbms.graph import Edge, Node
+from kgrdbms.graph import Edge, Node, _normalize_edge, _normalize_node
 
 
 _SCHEMA_STATEMENTS = [
@@ -163,6 +163,41 @@ class PostgresGraph:
                 )
         return Node(id=id, kind=kind, name=name, labels=set(labels), properties=properties)
 
+    def add_nodes(self, specs: Iterable["Node | dict"]) -> int:
+        """Bulk upsert nodes in one transaction via executemany. Mirrors Graph.add_nodes."""
+        node_rows: list[tuple] = []
+        label_rows: list[tuple] = []
+        prop_rows: list[tuple] = []
+        count = 0
+        for spec in specs:
+            nid, kind, name, labels, props = _normalize_node(spec)
+            node_rows.append((nid, kind, name))
+            for label in set(labels):
+                label_rows.append((nid, label))
+            for k, v in props.items():
+                prop_rows.append((nid, k, self._Jsonb(v)))
+            count += 1
+        if not node_rows:
+            return 0
+        with self.tx():
+            self.conn.cursor().executemany(
+                "INSERT INTO nodes(id, kind, name) VALUES (%s, %s, %s) "
+                "ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, name=excluded.name",
+                node_rows,
+            )
+            if label_rows:
+                self.conn.cursor().executemany(
+                    "INSERT INTO node_labels(node_id, label) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    label_rows,
+                )
+            if prop_rows:
+                self.conn.cursor().executemany(
+                    "INSERT INTO node_properties(node_id, key, value_json) VALUES (%s, %s, %s) "
+                    "ON CONFLICT(node_id, key) DO UPDATE SET value_json=excluded.value_json",
+                    prop_rows,
+                )
+        return count
+
     def add_label(self, node_id: str, *labels: str) -> None:
         with self.tx():
             for label in labels:
@@ -225,6 +260,35 @@ class PostgresGraph:
                     (edge_id, k, self._Jsonb(v)),
                 )
         return Edge(id=edge_id, from_node=from_node, to_node=to_node, type=type, properties=props)
+
+    def add_edges(self, specs: Iterable["Edge | dict | tuple | list"]) -> int:
+        """Bulk add edges in one transaction. Triples stay unique (ON CONFLICT DO NOTHING);
+        properties attach to the surviving row via a triple subquery. Mirrors Graph.add_edges."""
+        edge_rows: list[tuple] = []
+        prop_rows: list[tuple] = []
+        count = 0
+        for spec in specs:
+            f, t, typ, props = _normalize_edge(spec)
+            edge_rows.append((uuid.uuid4().hex, f, t, typ))
+            for k, v in props.items():
+                prop_rows.append((f, typ, t, k, self._Jsonb(v)))
+            count += 1
+        if not edge_rows:
+            return 0
+        with self.tx():
+            self.conn.cursor().executemany(
+                "INSERT INTO edges(id, from_node, to_node, type) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (from_node, type, to_node) DO NOTHING",
+                edge_rows,
+            )
+            if prop_rows:
+                self.conn.cursor().executemany(
+                    "INSERT INTO edge_properties(edge_id, key, value_json) VALUES "
+                    "((SELECT id FROM edges WHERE from_node=%s AND type=%s AND to_node=%s), %s, %s) "
+                    "ON CONFLICT(edge_id, key) DO UPDATE SET value_json=excluded.value_json",
+                    prop_rows,
+                )
+        return count
 
     def delete_edge(self, from_node: str, to_node: str, type: str) -> int:
         with self.tx():
