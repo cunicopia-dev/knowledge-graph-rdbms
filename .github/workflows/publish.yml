@@ -1,0 +1,45 @@
+name: Publish to PyPI
+
+# Publishes on a version tag (e.g. `git tag v0.1.1 && git push --tags`).
+# Auth is PyPI Trusted Publishing (OIDC) — no token stored anywhere.
+# One-time setup at https://pypi.org/manage/account/publishing/ :
+#   PyPI project name: knowledge-graph-rdbms
+#   Owner:             cunicopia-dev
+#   Repository:        knowledge-graph-rdbms
+#   Workflow name:     publish.yml
+#   Environment:       pypi
+#
+# This workflow uses no event-provided input in run: steps (no injection surface).
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish (Trusted Publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # mint the short-lived OIDC token PyPI verifies
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
