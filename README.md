@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
-![tests: 54 passing](https://img.shields.io/badge/tests-54_passing-brightgreen)
+![tests: 62 passing](https://img.shields.io/badge/tests-62_passing-brightgreen)
 ![storage: SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
@@ -707,7 +707,7 @@ own. Everything else layers on top; `service.py` depends only on the
 ```bash
 git clone <repo> && cd knowledge-graph-rdbms
 uv venv && uv pip install -e ".[dev]"
-pytest                       # 54 tests
+pytest                       # 62 tests
 python bench/benchmark.py    # benchmark with p50–p99 (see bench/README.md)
 ```
 

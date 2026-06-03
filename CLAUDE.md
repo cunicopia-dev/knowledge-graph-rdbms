@@ -11,7 +11,7 @@ A label property graph (nodes, typed directed edges, labels, JSON properties) st
 ```bash
 uv venv && uv pip install -e ".[dev]"   # set up dev env (installs pytest + mcp)
 
-pytest                                   # run all tests (~54)
+pytest                                   # run all tests (~62)
 pytest tests/test_graph.py               # one file
 pytest tests/test_graph.py::test_name    # one test
 pytest -k events                         # by keyword

@@ -9,6 +9,7 @@ description = "A label property graph on an RDBMS (SQLite): nodes, typed edges, 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Keith Cunic" }]
 keywords = ["knowledge-graph", "graph", "label-property-graph", "sqlite", "mcp", "event-sourcing"]
 classifiers = [
     "Topic :: Database :: Database Engines/Servers",
@@ -17,6 +18,11 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/cunicopia-dev/knowledge-graph-rdbms"
+Repository = "https://github.com/cunicopia-dev/knowledge-graph-rdbms"
+Issues = "https://github.com/cunicopia-dev/knowledge-graph-rdbms/issues"
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
