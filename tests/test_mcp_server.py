@@ -62,6 +62,19 @@ def test_nodes_by_kind_and_label(mcp_mod):
     assert tagged == {"a:1", "b:1"}
 
 
+def test_schema_exposes_vocabulary(mcp_mod):
+    mcp_mod.kg_node_upsert(id="a:1", kind="A", name="1", labels=["Tagged"],
+                           properties={"status": "active"})
+    mcp_mod.kg_node_upsert(id="a:2", kind="A", name="2", properties={"status": "archived"})
+    s = mcp_mod.kg_schema()
+    assert s["kinds"] == {"A": 2}
+    assert s["labels"] == {"Tagged": 1}
+    assert s["node_keys_by_kind"]["A"] == {"status": 2}
+    # samples enumerate the enum-like status values
+    s2 = mcp_mod.kg_schema(samples=True)
+    assert s2["samples"]["A"]["values"]["status"] == ["active", "archived"]
+
+
 def test_edges_out_and_shortest_path(mcp_mod):
     for nid in ("x:1", "x:2", "x:3"):
         mcp_mod.kg_node_upsert(id=nid, kind="X", name=nid)

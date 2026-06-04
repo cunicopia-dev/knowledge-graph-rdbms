@@ -21,6 +21,8 @@ python bench/charts.py                   # render assets/*.png from bench data (
 python bench/runtimes/compare.py         # CPython vs Node vs Bun SQLite comparison
 
 kg stats                                 # default ontology (~/.kgrdbms/graph.db)
+kg schema                                # observed vocabulary: kinds, edge types, labels, keys-per-kind
+kg schema --samples                      # + example ids and enum-like property values per kind
 kg ontology list                         # the registry (the "db of dbs")
 kg ontology create coffee --stance inferential   # register a named ontology
 kg --ontology coffee node add drink:latte --kind Drink   # route to it (resolver)
@@ -107,4 +109,5 @@ Node ids follow `prefix:reference` — `person:ada-lovelace`, `company:apple`, `
 - **Properties round-trip as JSON.** Storage is `value_json`; ints/bools/lists/objects come back as their JSON type. CLI `--prop key=value` parses value as JSON when possible, else keeps it as a string.
 - **Per-call writes each commit (one fsync).** Wrapping work in `batch()` / using `add_nodes` / `add_edges` collapses to one transaction (~10× faster). Don't add a per-row commit inside a bulk loop.
 - **Reads are not in `service.py`** by design — callers hit `Graph` directly. Don't route reads through the gate.
+- **`schema()` is the discovery primitive.** It returns the *observed* vocabulary (kinds, edge types, labels, and property keys per kind, with counts; `samples=True` adds example ids + enum-like values) so a consumer can query by real values instead of guessing. It's a read like any other (`GraphBackend` method, Postgres port, stub line), and the MCP server instructions tell models to call `kg_schema` first. The schema is *observed, not enforced* — the graph stays schemaless; this just profiles what's there.
 - **CLI exit codes are contractual:** `0` ok, `1` not found / bad input, `2` policy denial, `3` invariant violation. Preserve these.

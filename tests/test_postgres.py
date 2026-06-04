@@ -107,6 +107,28 @@ def test_bulk_add_nodes_and_edges(pg):
     assert g.out("b:1")[0][0].properties == {"w": 9}
 
 
+def test_schema_on_postgres_mirrors_sqlite(pg):
+    g = pg.backend
+    g.add_nodes([
+        {"id": "person:ada", "kind": "Person", "name": "Ada",
+         "labels": ["important"], "properties": {"role": "analyst"}},
+        {"id": "person:alan", "kind": "Person", "name": "Alan",
+         "properties": {"role": "logician"}},
+        {"id": "memory:m1", "kind": "Memory", "name": "m1",
+         "properties": {"importance": "high", "content": "x" * 200}},
+    ])
+    g.add_edges([("person:ada", "memory:m1", "WROTE", {"year": 1843})])
+    s = g.schema(samples=True)
+    assert s["kinds"] == {"Person": 2, "Memory": 1}
+    assert s["edge_types"] == {"WROTE": 1}
+    assert s["labels"] == {"important": 1}
+    assert s["node_keys_by_kind"]["Person"]["role"] == 2
+    assert s["edge_keys"] == {"year": 1}
+    # enum enumerated, long free-text content omitted
+    assert s["samples"]["Memory"]["values"]["importance"] == ["high"]
+    assert "content" not in s["samples"]["Memory"]["values"]
+
+
 def test_replay_rebuilds_postgres_from_sqlite_log(pg):
     service.upsert_node(pg.backend, pg.events, id="p:1", kind="Person", name="One", actor="t")
     service.upsert_node(pg.backend, pg.events, id="p:2", kind="Person", name="Two", actor="t")

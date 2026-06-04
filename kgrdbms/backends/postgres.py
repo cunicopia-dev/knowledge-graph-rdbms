@@ -450,6 +450,73 @@ class PostgresGraph:
     def total_edges(self) -> int:
         return self.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
 
+    def schema(self, *, samples: bool = False, sample_limit: int = 20) -> dict:
+        """Observed schema (kinds, edge types, labels, property keys per kind),
+        mirroring Graph.schema. Pure aggregates over the same five tables; jsonb
+        values arrive already parsed, so no json.loads on the sampling path."""
+        kinds = self.count_nodes_by_kind()
+        edge_types = self.count_edges_by_type()
+        labels = {
+            r["label"]: r["c"]
+            for r in self.conn.execute(
+                "SELECT label, COUNT(*) AS c FROM node_labels GROUP BY label ORDER BY c DESC"
+            ).fetchall()
+        }
+        node_keys_by_kind: dict[str, dict[str, int]] = {}
+        for r in self.conn.execute(
+            "SELECT n.kind AS kind, p.key AS key, COUNT(*) AS c "
+            "FROM node_properties p JOIN nodes n ON n.id = p.node_id "
+            "GROUP BY n.kind, p.key ORDER BY n.kind, c DESC"
+        ).fetchall():
+            node_keys_by_kind.setdefault(r["kind"], {})[r["key"]] = r["c"]
+        edge_keys = {
+            r["key"]: r["c"]
+            for r in self.conn.execute(
+                "SELECT key, COUNT(*) AS c FROM edge_properties GROUP BY key ORDER BY c DESC"
+            ).fetchall()
+        }
+        result: dict[str, Any] = {
+            "nodes_total": self.total_nodes(),
+            "edges_total": self.total_edges(),
+            "kinds": kinds,
+            "edge_types": edge_types,
+            "labels": labels,
+            "node_keys_by_kind": node_keys_by_kind,
+            "edge_keys": edge_keys,
+        }
+        if samples:
+            result["samples"] = self._schema_samples(kinds, node_keys_by_kind, sample_limit)
+        return result
+
+    def _schema_samples(
+        self, kinds: dict[str, int], node_keys_by_kind: dict[str, dict[str, int]], sample_limit: int
+    ) -> dict[str, dict]:
+        from kgrdbms.graph import _scalar_samples
+
+        samples: dict[str, dict] = {}
+        for kind in kinds:
+            example_ids = [
+                r["id"]
+                for r in self.conn.execute(
+                    "SELECT id FROM nodes WHERE kind=%s ORDER BY id LIMIT 5", (kind,)
+                ).fetchall()
+            ]
+            values: dict[str, list] = {}
+            for key in node_keys_by_kind.get(kind, {}):
+                rows = self.conn.execute(
+                    "SELECT DISTINCT p.value_json FROM node_properties p "
+                    "JOIN nodes n ON n.id = p.node_id "
+                    "WHERE n.kind=%s AND p.key=%s LIMIT %s",
+                    (kind, key, sample_limit + 1),
+                ).fetchall()
+                if len(rows) > sample_limit:
+                    continue  # open-ended / free-text field — don't enumerate it
+                vals = _scalar_samples(r["value_json"] for r in rows)  # jsonb already parsed
+                if vals is not None:
+                    values[key] = vals
+            samples[kind] = {"example_ids": example_ids, "values": values}
+        return samples
+
     # ---- hydration (jsonb returns parsed values — no json.loads) --------
 
     def _hydrate_node(self, row: dict) -> Node:

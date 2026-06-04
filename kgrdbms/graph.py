@@ -187,6 +187,26 @@ def _normalize_edge(spec: "Edge | dict | tuple | list") -> tuple[str, str, str, 
     raise TypeError("edge spec must be an Edge, dict, or (from, to, type[, properties]) tuple")
 
 
+def _scalar_samples(values: Iterable[Any], *, max_str: int = 80) -> list | None:
+    """Bounded distinct scalar values for schema sampling.
+
+    Returns the values sorted, or None to signal "not an enumerable vocabulary"
+    — i.e. some value is a list/object or an over-long string, so showing it as a
+    closed set would mislead. Keeps `schema(samples=True)` from dumping free-text.
+    """
+    out: list = []
+    for v in values:
+        if isinstance(v, str):
+            if len(v) > max_str:
+                return None
+            out.append(v)
+        elif isinstance(v, (int, float)):  # bool is a subclass of int — included
+            out.append(v)
+        else:  # list / dict / None
+            return None
+    return sorted(out, key=str) if out else None
+
+
 # ---- graph ----------------------------------------------------------
 
 
@@ -621,6 +641,88 @@ class Graph:
 
     def total_edges(self) -> int:
         return self.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+
+    # ---- schema (observed TBox: the map of what's in the graph) ----
+
+    def schema(self, *, samples: bool = False, sample_limit: int = 20) -> dict:
+        """The observed schema of the graph — the vocabulary needed to query it
+        without guessing.
+
+        Returns kinds, edge types, labels, and property keys *per kind*, each
+        with counts. This is a profile of what actually occurs (the graph is
+        schemaless — nothing is enforced), the property-graph analogue of an
+        ontology's TBox derived from its ABox.
+
+        `samples=True` additionally returns, per kind, a few example node ids
+        (revealing the id/CURIE convention) and — for enum-like properties — the
+        bounded set of distinct scalar values a key takes, turning "there is a
+        key `status`" into "status is one of {active, archived}". A key whose
+        distinct values exceed `sample_limit` (a free-text field) is left
+        un-enumerated rather than dumped.
+
+        Read-only; pure GROUP BY aggregates. The intended first call for any
+        consumer dropped into an unfamiliar ontology.
+        """
+        kinds = self.count_nodes_by_kind()
+        edge_types = self.count_edges_by_type()
+        labels = {
+            r["label"]: r["c"]
+            for r in self.conn.execute(
+                "SELECT label, COUNT(*) AS c FROM node_labels GROUP BY label ORDER BY c DESC"
+            ).fetchall()
+        }
+        node_keys_by_kind: dict[str, dict[str, int]] = {}
+        for r in self.conn.execute(
+            "SELECT n.kind AS kind, p.key AS key, COUNT(*) AS c "
+            "FROM node_properties p JOIN nodes n ON n.id = p.node_id "
+            "GROUP BY n.kind, p.key ORDER BY n.kind, c DESC"
+        ).fetchall():
+            node_keys_by_kind.setdefault(r["kind"], {})[r["key"]] = r["c"]
+        edge_keys = {
+            r["key"]: r["c"]
+            for r in self.conn.execute(
+                "SELECT key, COUNT(*) AS c FROM edge_properties GROUP BY key ORDER BY c DESC"
+            ).fetchall()
+        }
+        result: dict[str, Any] = {
+            "nodes_total": self.total_nodes(),
+            "edges_total": self.total_edges(),
+            "kinds": kinds,
+            "edge_types": edge_types,
+            "labels": labels,
+            "node_keys_by_kind": node_keys_by_kind,
+            "edge_keys": edge_keys,
+        }
+        if samples:
+            result["samples"] = self._schema_samples(kinds, node_keys_by_kind, sample_limit)
+        return result
+
+    def _schema_samples(
+        self, kinds: dict[str, int], node_keys_by_kind: dict[str, dict[str, int]], sample_limit: int
+    ) -> dict[str, dict]:
+        samples: dict[str, dict] = {}
+        for kind in kinds:
+            example_ids = [
+                r["id"]
+                for r in self.conn.execute(
+                    "SELECT id FROM nodes WHERE kind=? ORDER BY id LIMIT 5", (kind,)
+                ).fetchall()
+            ]
+            values: dict[str, list] = {}
+            for key in node_keys_by_kind.get(kind, {}):
+                rows = self.conn.execute(
+                    "SELECT DISTINCT p.value_json FROM node_properties p "
+                    "JOIN nodes n ON n.id = p.node_id "
+                    "WHERE n.kind=? AND p.key=? LIMIT ?",
+                    (kind, key, sample_limit + 1),
+                ).fetchall()
+                if len(rows) > sample_limit:
+                    continue  # open-ended / free-text field — don't enumerate it
+                vals = _scalar_samples(json.loads(r["value_json"]) for r in rows)
+                if vals is not None:
+                    values[key] = vals
+            samples[kind] = {"example_ids": example_ids, "values": values}
+        return samples
 
     # ---- hydration -------------------------------------------------
 
