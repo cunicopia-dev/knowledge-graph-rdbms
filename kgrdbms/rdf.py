@@ -29,6 +29,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator
+from urllib.parse import quote, unquote
 
 from kgrdbms.backends.base import GraphBackend
 from kgrdbms.graph import Edge, Node
@@ -78,6 +79,22 @@ XSD = "http://www.w3.org/2001/XMLSchema#"
 KG = "https://kg.local/vocab#"
 
 
+def _enc(segment: str) -> str:
+    """Percent-encode an arbitrary string into a valid IRI path/fragment segment.
+
+    Node references are slug-safe, but `kind`, edge `type`, and property `key`
+    are free-form user text — a space or '%' there would otherwise emit an IRI
+    no conformant RDF store will parse. `safe=""` also encodes '/', so a key like
+    'a/b' can't masquerade as a path boundary. Inverted by `_dec` on import.
+    """
+    return quote(segment, safe="")
+
+
+def _dec(segment: str) -> str:
+    """Invert `_enc` — percent-decode an IRI segment back to its stored value."""
+    return unquote(segment)
+
+
 # ---- IRI context: the CURIE -> IRI expansion table -------------------
 
 
@@ -106,13 +123,13 @@ class IriContext:
             base = self.prefix_bases.get(prefix, f"{self.default_base}{prefix}/")
         else:
             prefix, ref, base = "", node_id, self.default_base
-        return Iri(f"{base}{ref}")
+        return Iri(f"{base}{_enc(ref)}")
 
     def prop_predicate(self, key: str) -> Iri:
-        return Iri(f"{self.prop_base}{key}")
+        return Iri(f"{self.prop_base}{_enc(key)}")
 
     def edge_predicate(self, edge_type: str) -> Iri:
-        return Iri(f"{self.edge_base}{edge_type}")
+        return Iri(f"{self.edge_base}{_enc(edge_type)}")
 
 
 # ---- value -> literal typing -----------------------------------------
@@ -163,7 +180,7 @@ def node_to_triples(node: Node, ctx: IriContext) -> list[Triple]:
     s = ctx.expand_node(node.id)
     triples: list[Triple] = [
         # kind -> rdf:type, pointing at a class IRI under the kg vocab.
-        (s, Iri(f"{RDF}type"), Iri(f"{KG}{node.kind}")),
+        (s, Iri(f"{RDF}type"), Iri(f"{KG}{_enc(node.kind)}")),
     ]
     if node.name:
         triples.append((s, Iri(f"{KG}name"), Literal(node.name)))
@@ -494,18 +511,19 @@ def contract_iri(iri: str, ctx: IriContext) -> str:
     # Explicit prefix bindings win (longest base first to avoid prefix overlap).
     for prefix, base in sorted(ctx.prefix_bases.items(), key=lambda kv: -len(kv[1])):
         if iri.startswith(base):
-            return f"{prefix}:{iri[len(base):]}"
+            return f"{prefix}:{_dec(iri[len(base):])}"
     if iri.startswith(ctx.default_base):
         rest = iri[len(ctx.default_base):]
         if "/" in rest:
             prefix, ref = rest.split("/", 1)
-            return f"{prefix}:{ref}"
-        return rest
+            return f"{prefix}:{_dec(ref)}"
+        return _dec(rest)
     return iri  # foreign IRI — keep verbatim
 
 
 def _local_after(iri: str, base: str) -> str | None:
-    return iri[len(base):] if iri.startswith(base) else None
+    """Strip `base` and percent-decode the remaining segment (kind/type/key)."""
+    return _dec(iri[len(base):]) if iri.startswith(base) else None
 
 
 def triples_to_graph(triples: list[Triple], ctx: IriContext | None = None) -> tuple[list[dict], list[dict]]:
