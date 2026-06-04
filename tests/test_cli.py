@@ -147,3 +147,45 @@ def test_invariant_violation_exits_3(db, capsys, monkeypatch):
     monkeypatch.setattr("kgrdbms.invariants.enforce", seal)
     assert run(db, "node", "add", "x", "--kind", "Sealed") == 3
     assert "invariant" in capsys.readouterr().err
+
+
+# ---- rdf export / import --------------------------------------------
+
+
+def _seed_pair(db):
+    run(db, "node", "add", "person:ada", "--kind", "Person", "--name", "Ada", "--prop", "born=1815")
+    run(db, "node", "add", "person:grace", "--kind", "Person", "--name", "Grace")
+    run(db, "edge", "add", "person:ada", "person:grace", "influences",
+        "--prop", "since=2020", "--prop", "weight=0.8")
+
+
+def test_rdf_export_turtle_star(db, capsys):
+    _seed_pair(db)
+    capsys.readouterr()
+    assert run(db, "rdf", "export", "--format", "turtle") == 0
+    out = capsys.readouterr().out
+    assert "person:ada a kg:Person ;" in out                  # CURIE round-trips
+    assert "<< person:ada rel:influences person:grace >>" in out  # rdf-star edge
+
+
+def test_rdf_round_trip_ntriples(db, tmp_path, capsys):
+    _seed_pair(db)
+    path = str(tmp_path / "g.nt")
+    assert run(db, "rdf", "export", "--format", "ntriples", "--out", path) == 0
+    mirror = str(tmp_path / "mirror.db")
+    assert run(mirror, "rdf", "import", path, "--format", "ntriples") == 0
+    # The edge and its property survived into the fresh db.
+    g = Graph(path=mirror)
+    edge_props = {(e.type): e.properties for e, _ in g.out("person:ada")}
+    assert edge_props["influences"]["since"] == 2020
+    assert edge_props["influences"]["weight"] == 0.8
+
+
+def test_rdf_export_lossy_reports_dropped(db, capsys):
+    _seed_pair(db)
+    capsys.readouterr()
+    assert run(db, "rdf", "export", "--format", "ntriples", "--edge-strategy", "lossy") == 0
+    captured = capsys.readouterr()
+    assert "rel/influences" in captured.out      # bare edge present
+    assert "prop/since" not in captured.out       # property dropped
+    assert "dropped" in captured.err              # but loudly, not silently

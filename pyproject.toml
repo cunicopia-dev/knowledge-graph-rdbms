@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knowledge-graph-rdbms"
-version = "0.1.1"
+version = "0.1.2.dev0"
 description = "A label property graph on an RDBMS (SQLite): nodes, typed edges, an append-only event log, and an optional MCP server."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,7 +28,8 @@ Issues = "https://github.com/cunicopia-dev/knowledge-graph-rdbms/issues"
 mcp = ["mcp>=1.0"]
 charts = ["matplotlib>=3.7"]
 postgres = ["psycopg[binary]>=3.1"]
-dev = ["pytest>=7.0", "mcp>=1.0", "psycopg[binary]>=3.1"]
+rdf = ["rdflib>=7.0"]   # only needed for parsing/SPARQL on import; export is dep-free
+dev = ["pytest>=7.0", "mcp>=1.0", "psycopg[binary]>=3.1", "rdflib>=7.0"]
 
 [project.scripts]
 kg = "kgrdbms.cli:main"
