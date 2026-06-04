@@ -24,7 +24,7 @@ import json
 import sys
 from typing import Any
 
-from kgrdbms import __version__, resolver, service
+from kgrdbms import __version__, rdf, resolver, service
 from kgrdbms.events import EventLog
 from kgrdbms.graph import Edge, Graph, Node
 from kgrdbms.invariants import InvariantViolation
@@ -358,6 +358,53 @@ def cmd_import(app: App, args) -> int:
     return 0
 
 
+def cmd_rdf_export(app: App, args) -> int:
+    """Serialize the whole graph to RDF (Turtle/N-Triples, RDF-star by default).
+
+    Export is dependency-free. `--edge-strategy` chooses how edge properties
+    cross: rdf-star (quoted triples, default), reification (rdf:Statement), or
+    lossy (bare triples — the dropped count is reported, never silent).
+    """
+    ctx = rdf.IriContext(edge_strategy=args.edge_strategy)
+    triples = rdf.export_graph(app.graph, ctx)
+    if args.format in ("turtle", "ttl"):
+        text = rdf.to_turtle(triples, ctx)
+    else:
+        text = rdf.to_ntriples(triples)
+    dropped = getattr(triples, "dropped_edge_props", 0)
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        note = f" ({dropped} edge-property values dropped by lossy)" if dropped else ""
+        app.emit(
+            {"format": args.format, "triples": len(triples), "out": args.out, "dropped_edge_props": dropped},
+            f"wrote {len(triples):,} triples to {args.out}{note}",
+        )
+    elif app.as_json:
+        app.emit({"format": args.format, "triples": len(triples), "dropped_edge_props": dropped, "rdf": text})
+    else:
+        if dropped:
+            print(f"# note: {dropped} edge-property values dropped by lossy strategy", file=sys.stderr)
+        print(text, end="")  # raw RDF to stdout, pipeable
+    return 0
+
+
+def cmd_rdf_import(app: App, args) -> int:
+    """Load RDF into the graph through the gated + logged path (replayable).
+
+    N-Triples import is dependency-free; Turtle import needs the 'rdf' extra
+    (rdflib). `--edge-strategy` must match how the RDF encoded its edges.
+    """
+    with open(args.file, encoding="utf-8") as fh:
+        text = fh.read()
+    ctx = rdf.IriContext(edge_strategy=args.edge_strategy)
+    res = rdf.import_rdf(app.graph, app.events, text, fmt=args.format, ctx=ctx, actor=args.actor)
+    app.emit(res, f"imported {res['nodes_imported']:,} nodes and "
+                  f"{res['edges_imported']:,} edges from {args.file} (gated + logged)")
+    return 0
+
+
 def cmd_serve(app: App, args) -> int:
     try:
         from kgrdbms import mcp_server
@@ -504,6 +551,29 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("file")
     a.add_argument("--actor", default="cli-import")
     a.set_defaults(func=cmd_import)
+
+    # ---- RDF boundary ----
+    rdfp = sub.add_parser("rdf", help="export/import RDF (Turtle / N-Triples, RDF-star)")
+    rdfsub = rdfp.add_subparsers(dest="action", required=True)
+
+    a = rdfsub.add_parser("export", help="serialize the graph to RDF (dependency-free)")
+    a.add_argument("--format", default="turtle", choices=["turtle", "ttl", "ntriples", "nt"],
+                   help="turtle (default, human-readable) or ntriples (lossless, dep-free)")
+    a.add_argument("--edge-strategy", dest="edge_strategy", default="rdf-star",
+                   choices=["rdf-star", "reification", "lossy"],
+                   help="how edge properties cross the boundary (default: rdf-star)")
+    a.add_argument("--out", help="write to this file (default: stdout)")
+    a.set_defaults(func=cmd_rdf_export)
+
+    a = rdfsub.add_parser("import", help="load RDF into the graph (gated + logged)")
+    a.add_argument("file")
+    a.add_argument("--format", default="ntriples", choices=["ntriples", "nt", "turtle", "ttl"],
+                   help="ntriples (default, dep-free) or turtle (needs the 'rdf' extra)")
+    a.add_argument("--edge-strategy", dest="edge_strategy", default="rdf-star",
+                   choices=["rdf-star", "reification", "lossy"],
+                   help="strategy the RDF was written with, so edges decode correctly")
+    a.add_argument("--actor", default="rdf-import")
+    a.set_defaults(func=cmd_rdf_import)
 
     a = sub.add_parser("serve", help="run the MCP server (needs the 'mcp' extra)")
     a.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http"])
