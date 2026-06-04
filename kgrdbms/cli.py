@@ -173,6 +173,43 @@ def cmd_stats(app: App, args) -> int:
     return 0
 
 
+def cmd_schema(app: App, args) -> int:
+    """The observed schema: kinds, edge types, labels, and property keys per kind.
+
+    The map to read *before* querying an unfamiliar ontology — so you query by a
+    kind/label/key that actually exists instead of guessing.
+    """
+    res = app.graph.schema(samples=args.samples)
+    if res.get("ontology") is None and app.ontology:
+        res = {"ontology": app.ontology, **res}
+
+    lines: list[str] = []
+    if app.ontology:
+        lines.append(f"ontology: {app.ontology}")
+    lines.append(f"nodes: {res['nodes_total']:,}   edges: {res['edges_total']:,}")
+    lines.append("")
+    lines.append("kinds (node count) and their property keys:")
+    for kind, n in res["kinds"].items():
+        keys = res["node_keys_by_kind"].get(kind, {})
+        keystr = ", ".join(f"{k}×{c}" for k, c in keys.items()) or "(no properties)"
+        lines.append(f"  {kind}  ×{n}")
+        lines.append(f"      keys: {keystr}")
+        if args.samples:
+            samp = res.get("samples", {}).get(kind, {})
+            ex = ", ".join(samp.get("example_ids", []))
+            if ex:
+                lines.append(f"      e.g. {ex}")
+            for k, vals in samp.get("values", {}).items():
+                lines.append(f"      {k} ∈ {{{', '.join(str(v) for v in vals)}}}")
+    lines.append("")
+    lines.append("edge types: " + (", ".join(f"{t}×{c}" for t, c in res["edge_types"].items()) or "(none)"))
+    lines.append("labels: " + (", ".join(f"{l}×{c}" for l, c in res["labels"].items()) or "(none)"))
+    if res["edge_keys"]:
+        lines.append("edge keys: " + ", ".join(f"{k}×{c}" for k, c in res["edge_keys"].items()))
+    app.emit(res, "\n".join(lines))
+    return 0
+
+
 # ---- registry handlers (the control plane / db-of-dbs) ---------------
 
 
@@ -431,6 +468,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("stats", help="node/edge counts, db path, active ontology")
     sp.set_defaults(func=cmd_stats)
+
+    sp = sub.add_parser("schema", help="observed schema: kinds, edge types, labels, "
+                                       "property keys per kind (read this before querying)")
+    sp.add_argument("--samples", action="store_true",
+                    help="also show example node ids and enum-like property values per kind")
+    sp.set_defaults(func=cmd_schema)
 
     # ---- ontology registry (the db-of-dbs) ----
     ont = sub.add_parser("ontology", help="manage the ontology registry").add_subparsers(dest="action", required=True)

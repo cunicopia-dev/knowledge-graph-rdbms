@@ -505,6 +505,8 @@ kg out person:ada                 # outbound edges
 kg path person:ada field:cs       # shortest path
 kg nodes-by-kind Person
 kg stats
+kg schema                         # observed vocabulary — kinds, edge types, labels, keys-per-kind
+kg schema --samples               # + example ids and enum-like property values per kind
 kg --json node get person:ada     # machine-readable output for piping
 
 kg events -n 10                   # tail the event log
@@ -539,7 +541,8 @@ Or hand-edit a client config (e.g. Claude Desktop):
 { "mcpServers": { "kgrdbms": { "command": "kgrdbms-mcp" } } }
 ```
 
-It exposes `kg_`-prefixed tools for reads (`kg_node_get`, `kg_nodes_by_kind`,
+It exposes `kg_`-prefixed tools for reads (`kg_schema` — the vocabulary, meant to
+be called first; `kg_node_get`, `kg_nodes_by_kind`,
 `kg_neighborhood`, `kg_shortest_path`, `kg_descendants`, …), gated writes
 (`kg_node_upsert`, `kg_edge_add`, `kg_node_delete`, …), bulk composition
 (`kg_import` — a whole `{nodes, edges}` batch in one call, so an agent populates
@@ -712,6 +715,7 @@ replayable.
 | Command                         | What it does                                  |
 | ------------------------------- | --------------------------------------------- |
 | `kg stats`                      | node/edge counts and db path                  |
+| `kg schema [--samples]`         | observed vocabulary: kinds, edge types, labels, keys-per-kind |
 | `kg node add ID --kind K …`     | create or update a node (gated + logged)      |
 | `kg node get ID`                | fetch a node                                  |
 | `kg node del ID`                | delete a node (cascades edges)                |

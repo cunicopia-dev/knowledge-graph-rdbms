@@ -211,3 +211,23 @@ def test_edge_add_missing_endpoint_exits_1(db, capsys):
     assert run(db, "edge", "add", "x:1", "y:1", "LINK") == 1
     err = capsys.readouterr().err
     assert "to node 'y:1' does not exist" in err and "Traceback" not in err
+
+
+def test_schema_json_lists_kinds_and_keys(db, capsys):
+    run(db, "node", "add", "person:ada", "--kind", "Person", "--prop", "role=analyst")
+    run(db, "node", "add", "memory:m1", "--kind", "Memory", "--prop", "importance=high")
+    capsys.readouterr()
+    assert run(db, "schema", as_json=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kinds"] == {"Person": 1, "Memory": 1}
+    assert payload["node_keys_by_kind"]["Person"] == {"role": 1}
+    assert payload["node_keys_by_kind"]["Memory"] == {"importance": 1}
+
+
+def test_schema_samples_human_shows_enum_values(db, capsys):
+    run(db, "node", "add", "memory:m1", "--kind", "Memory", "--prop", "importance=high")
+    run(db, "node", "add", "memory:m2", "--kind", "Memory", "--prop", "importance=low")
+    capsys.readouterr()
+    assert run(db, "schema", "--samples") == 0
+    out = capsys.readouterr().out
+    assert "importance" in out and "high" in out and "low" in out

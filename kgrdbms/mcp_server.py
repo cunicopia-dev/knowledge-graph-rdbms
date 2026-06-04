@@ -21,6 +21,8 @@ Tool surface (all prefixed kg_):
 
   reads
     kg_stats              — node/edge counts, the db path, the active ontology
+    kg_schema             — observed vocabulary (kinds, edge types, labels, keys);
+                            read this FIRST to query without guessing
     kg_node_get           — fetch a node by id
     kg_nodes_by_kind      — list all nodes of a kind
     kg_nodes_by_label     — list all nodes carrying a label
@@ -90,7 +92,10 @@ mcp = FastMCP(
         "prefixed kg_ read or mutate nodes (id, kind, name, labels, properties) "
         "and typed directed edges. Every tool takes an optional `ontology` name "
         "(omit for the default); use kg_ontologies_list to discover them and "
-        "kg_ontology_create to add one. Writes are gated by compiled-in "
+        "kg_ontology_create to add one. When working with an ontology whose "
+        "contents you don't already know, call kg_schema FIRST — it returns the "
+        "exact kinds, edge types, labels, and property keys so you can query by "
+        "real values instead of guessing. Writes are gated by compiled-in "
         "invariants and a configurable policy, and recorded to an append-only, "
         "replayable event log."
     ),
@@ -195,6 +200,26 @@ def kg_stats(ontology: str | None = None) -> dict:
         "edges_by_type": b.backend.count_edges_by_type(),
         "db_path": b.entry.path,
     }
+
+
+@mcp.tool()
+def kg_schema(samples: bool = False, ontology: str | None = None) -> dict:
+    """The observed schema of an ontology — CALL THIS FIRST when you don't already
+    know what an ontology contains, before kg_nodes_by_kind / kg_nodes_by_label /
+    kg_node_get. It tells you the exact vocabulary so you never have to guess.
+
+    Returns:
+      - kinds            — every node `kind` and its count
+      - edge_types       — every edge `type` and its count
+      - labels           — every label and its count
+      - node_keys_by_kind— for each kind, which property keys its nodes carry (+counts)
+      - edge_keys        — property keys that appear on edges
+
+    With samples=True, also returns per kind a few example node ids (showing the
+    id/CURIE convention) and, for enum-like properties, the set of distinct values
+    a key takes (free-text keys are left un-enumerated). Read-only; cheap.
+    """
+    return _bundle(ontology).backend.schema(samples=samples)
 
 
 @mcp.tool()
