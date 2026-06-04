@@ -95,6 +95,11 @@ def upsert_node(
 
 def set_label(graph: Graph, events: EventLog, id: str, label: str, actor: str = "anonymous") -> Node | None:
     guard(graph, _node_ctx(graph, id, "node_set_label"))
+    node = graph.node(id)
+    if node is None:
+        raise ValueError(f"node {id!r} does not exist")
+    if label in node.labels:
+        return node  # already present: a true no-op, so don't log a non-invertible event
     graph.add_label(id, label)
     events.record(actor, OP_NODE_SET_LABEL, {"id": id, "label": label})
     return graph.node(id)
@@ -107,7 +112,9 @@ def set_property(
     ctx.property_key = key
     guard(graph, ctx)
     prior_node = graph.node(id)
-    prior_value = prior_node.properties.get(key, _MISSING) if prior_node else _MISSING
+    if prior_node is None:
+        raise ValueError(f"node {id!r} does not exist")
+    prior_value = prior_node.properties.get(key, _MISSING)
     graph.set_property(id, key, value)
     events.record(actor, OP_NODE_SET_PROPERTY, {"id": id, "key": key, "value": value, "prior": prior_value})
     return graph.node(id)
@@ -139,6 +146,9 @@ def add_edge(
 ) -> Edge:
     ctx = MutationContext(operation="edge_add", edge_type=type, from_node_id=from_id, to_node_id=to_id)
     guard(graph, ctx)
+    for endpoint, role in ((from_id, "from"), (to_id, "to")):
+        if graph.node(endpoint) is None:
+            raise ValueError(f"{role} node {endpoint!r} does not exist")
     edge = graph.add_edge(from_node=from_id, to_node=to_id, type=type, properties=properties or {})
     events.record(actor, OP_EDGE_ADD, {"edge": edge_spec(edge)})
     return edge

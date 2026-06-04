@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from typing import Any
 
@@ -598,6 +599,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unavailable: {e}", file=sys.stderr)
         return 1
     except (KeyError, ValueError, FileNotFoundError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except sqlite3.IntegrityError as e:
+        # Safety net for any FK/constraint path not pre-checked in service.py
+        # (e.g. restoring a deleted node whose edge endpoint is since gone).
         print(f"error: {e}", file=sys.stderr)
         return 1
     finally:

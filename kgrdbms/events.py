@@ -53,6 +53,7 @@ OP_NODE_DEL_PROPERTY = "NODE_DEL_PROPERTY"
 OP_EDGE_ADD = "EDGE_ADD"
 OP_EDGE_REMOVE = "EDGE_REMOVE"
 OP_RESTORE = "RESTORE"        # re-create a captured node + its edges (used to undo a delete)
+OP_NODE_RESTORE_STATE = "NODE_RESTORE_STATE"  # exact-restore a node to a prior snapshot (undo of an upsert)
 OP_BATCH = "BATCH"            # add many nodes + edges in one event
 OP_GENESIS = "GENESIS"
 
@@ -226,7 +227,11 @@ class EventLog:
             prior = p.get("prior")
             if prior is None:
                 return OP_NODE_DELETE, {"node": p["after"], "edges": []}
-            return OP_NODE_UPSERT, {"after": prior, "prior": p["after"]}
+            # A plain re-upsert of `prior` would MERGE, so it cannot remove the
+            # labels/properties this upsert *added* — leaving a non-inverse. The
+            # exact-restore op carries the prior snapshot plus the `added` delta,
+            # so it can strip those additions and rebuild `prior` precisely.
+            return OP_NODE_RESTORE_STATE, {"node": prior, "added": p["after"]}
         if op == OP_NODE_DELETE:
             return OP_RESTORE, {"node": p["node"], "edges": p.get("edges", [])}
         if op == OP_NODE_SET_LABEL:
@@ -261,6 +266,19 @@ def apply_event(graph: "Graph", ev: GraphEvent) -> None:
                        labels=spec.get("labels", []), properties=spec.get("properties", {}))
         for e in p.get("edges", []):
             graph.add_edge(e["from"], e["to"], e["type"], e.get("properties", {}))
+    elif op == OP_NODE_RESTORE_STATE:
+        # Exact-restore a node to `node`, removing the labels/properties that the
+        # reverted upsert added (`added` is that upsert's delta). add_node is a
+        # merge, so we must strip the additions first, then rebuild the snapshot.
+        target = p["node"]
+        added = p.get("added", {})
+        nid = target["id"]
+        for label in set(added.get("labels", [])) - set(target.get("labels", [])):
+            graph.remove_label(nid, label)
+        for key in set(added.get("properties", {}).keys()) - set(target.get("properties", {}).keys()):
+            graph.del_property(nid, key)
+        graph.add_node(nid, target["kind"], target["name"],
+                       labels=target.get("labels", []), properties=target.get("properties", {}))
     elif op == OP_NODE_SET_LABEL:
         graph.add_label(p["id"], p["label"])
     elif op == OP_NODE_REMOVE_LABEL:

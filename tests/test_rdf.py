@@ -97,6 +97,47 @@ def test_rdf_star_annotates_the_quoted_triple(populated):
     assert "<https://kg.local/prop/since>" in nt
 
 
+def test_special_chars_produce_valid_iris(populated):
+    """Regression: kind / edge-type / property-key with spaces or punctuation
+    must percent-encode into valid IRIs, not emit a raw space a store rejects."""
+    g = _fresh_graph()
+    g.add_node("topic:ml", kind="Knowledge Area", name="ML",
+               properties={"first name": "Ada", "rate %": 50, "a/b": 1})
+    g.add_node("topic:cs", kind="Knowledge Area", name="CS")
+    g.add_edge("topic:ml", "topic:cs", "is part of", properties={"note": "x"})
+
+    nt = rdf.export(g, "ntriples")
+    assert "Knowledge%20Area" in nt
+    assert "prop/first%20name" in nt
+    assert "rel/is%20part%20of" in nt
+    assert "prop/a%2Fb" in nt          # '/' encoded so it can't fake a path boundary
+    # No IRI reference may contain a raw space (would break any conformant parser).
+    import re
+    for iri in re.findall(r"<([^<>]+)>", nt):
+        assert " " not in iri, f"raw space in IRI: {iri!r}"
+
+
+def test_special_chars_round_trip_and_rdflib_accepts(populated):
+    rdflib = pytest.importorskip("rdflib")
+    g = _fresh_graph()
+    g.add_node("topic:ml", kind="Knowledge Area", name="ML",
+               properties={"first name": "Ada", "rate %": 50, "a/b": 1})
+    g.add_node("topic:cs", kind="Knowledge Area", name="CS")
+    g.add_edge("topic:ml", "topic:cs", "is part of", properties={"note": "x"})
+
+    # A conformant store accepts the export (reification — rdflib is RDF 1.1).
+    ctx = rdf.IriContext(edge_strategy="reification")
+    rdflib.Graph().parse(data=rdf.export(g, "ntriples", ctx), format="nt")
+
+    # And the values survive a full star round-trip unchanged.
+    dst = _reimport(rdf.export(g, "ntriples"), "ntriples")
+    n = dst.node("topic:ml")
+    assert n.kind == "Knowledge Area"
+    assert n.properties == {"first name": "Ada", "rate %": 50, "a/b": 1}
+    e = dst.out("topic:ml")[0][0]
+    assert e.type == "is part of" and e.properties == {"note": "x"}
+
+
 def test_reification_emits_statement_node(populated):
     ctx = rdf.IriContext(edge_strategy="reification")
     triples = rdf.export_graph(populated, ctx)
