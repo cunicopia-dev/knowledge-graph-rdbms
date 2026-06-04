@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knowledge-graph-rdbms"
-version = "0.1.3.dev0"
+version = "0.1.3"
 description = "A label property graph on an RDBMS (SQLite): nodes, typed edges, an append-only event log, and an optional MCP server."
 readme = "README.md"
 requires-python = ">=3.10"
