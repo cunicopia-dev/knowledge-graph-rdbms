@@ -1,0 +1,46 @@
+name: CI
+
+# Runs the test suite on every push to master and every pull request.
+# Make the `ci` job below a required status check in branch protection to
+# gate merges on a green suite.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python ${{ matrix.python-version }}
+      - run: uv pip install -e ".[dev]"
+      - run: uv run pytest -q
+
+  # Single stable check to require in branch protection — passes only if every
+  # matrix leg above passed (so you don't have to list each Python version).
+  ci:
+    name: ci
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Verify all test jobs passed
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "test matrix failed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "all test jobs passed"

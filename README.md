@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
-![tests: 62 passing](https://img.shields.io/badge/tests-62_passing-brightgreen)
+![tests: 79 passing](https://img.shields.io/badge/tests-79_passing-brightgreen)
 ![storage: SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
@@ -51,6 +51,7 @@ Small enough to hold in your head. Flexible enough to model anything.
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [Performance](#performance)
+- [RDF interop: export, SPARQL, RDF-star](#rdf-interop-export-sparql-rdf-star)
 - [Command reference](#command-reference)
 - [Project layout](#project-layout)
 - [Development](#development)
@@ -542,7 +543,8 @@ It exposes `kg_`-prefixed tools for reads (`kg_node_get`, `kg_nodes_by_kind`,
 `kg_neighborhood`, `kg_shortest_path`, `kg_descendants`, …), gated writes
 (`kg_node_upsert`, `kg_edge_add`, `kg_node_delete`, …), bulk composition
 (`kg_import` — a whole `{nodes, edges}` batch in one call, so an agent populates
-an ontology in a single tool call instead of dozens), and the event log
+an ontology in a single tool call instead of dozens), RDF interop
+(`kg_rdf_export`, `kg_rdf_import` — see below), and the event log
 (`kg_events_tail`, `kg_event_revert`, `kg_replay`). Every write passes through
 the invariants + policy gate and is recorded — same engine, same file as the
 CLI. Every tool also takes an optional `ontology` name (omit for the default),
@@ -644,6 +646,67 @@ ontology to it while the hot, shallow ones stay embedded.
 
 ---
 
+## RDF interop: export, SPARQL, RDF-star
+
+The store stays a label property graph. RDF is a **boundary** format here, not a
+storage model — there is no triplestore, no OWL, no embedded SPARQL engine. The
+project adopts exactly one RDF idea, because it is the only one expensive to
+retrofit: **stable identity** (CURIE node ids). This is where a CURIE finally
+expands into a real IRI.
+
+```bash
+kg rdf export                         # Turtle, to stdout (RDF-star edges)
+kg rdf export --format ntriples --out graph.nt
+kg rdf import graph.nt                 # back in — gated, logged, replayable
+```
+
+Export is **dependency-free**. Node ids round-trip as CURIEs, because the prefix
+binding makes the IRI collapse back to exactly what you stored:
+
+```turtle
+@prefix person: <https://kg.local/person/> .
+@prefix kg:     <https://kg.local/vocab#> .
+
+person:ada a kg:Person ;
+    kg:name "Ada Lovelace" ;
+    prop:born "1815"^^xsd:integer ;
+    rel:influences person:grace .
+
+<< person:ada rel:influences person:grace >> prop:since "2020"^^xsd:integer .
+```
+
+That last line is the interesting one. A plain triple has nowhere to hang an
+**edge's** properties; `--edge-strategy` decides how they cross:
+
+| strategy           | edge `{since: 2020}` becomes                          | when to use                            |
+| ------------------ | ----------------------------------------------------- | -------------------------------------- |
+| `rdf-star` (default) | `<< :ada :influences :grace >> :since 2020`         | star-aware stores (Stardog, Jena 4.3+, Oxigraph) |
+| `reification`      | an `rdf:Statement` node carrying s/p/o + each property | rdflib and any RDF 1.1 tool            |
+| `lossy`            | the bare triple; properties dropped (count reported)  | you only want topology                 |
+
+**SPARQL?** Yes — against the export, in any store. You don't embed a query
+engine (that would betray the zero-dependency, no-SPARQL design); you emit a
+graph a real engine can query:
+
+```python
+import rdflib
+from kgrdbms import rdf
+
+# rdflib is RDF 1.1 — no star — so emit reification for it:
+ttl = rdf.export(graph, "turtle", rdf.IriContext(edge_strategy="reification"))
+store = rdflib.Graph(); store.parse(data=ttl, format="turtle")
+store.query("SELECT ?s ?o WHERE { ?s <https://kg.local/rel/influences> ?o }")
+```
+
+For SPARQL-**star** over the `rdf-star` export, hand the Turtle to a star-native
+store (Stardog, Jena, Oxigraph, GraphDB). Turtle/foreign-RDF *import* needs the
+optional extra (`pip install "knowledge-graph-rdbms[rdf]"`, which pulls
+`rdflib`); N-Triples import and **all** export stay dependency-free. Imported RDF
+rides the same gated, logged path as every other write, so it is audited and
+replayable.
+
+---
+
 ## Command reference
 
 | Command                         | What it does                                  |
@@ -667,6 +730,8 @@ ontology to it while the hot, shallow ones stay embedded.
 | `kg revert EVENT_ID`            | undo an event (compensating event)            |
 | `kg replay [--upto TS]`         | rebuild the projection from the log           |
 | `kg import FILE`                | bulk `{nodes, edges}` import (gated + logged) |
+| `kg rdf export [--format F]`    | serialize to Turtle/N-Triples (RDF-star)      |
+| `kg rdf import FILE`            | load RDF back in (gated + logged)             |
 | `kg ontology list`              | list registered ontologies (the registry)     |
 | `kg ontology create NAME …`     | register an ontology (`--backend`, `--stance`) |
 | `kg serve [--transport T]`      | run the MCP server                            |
@@ -692,6 +757,7 @@ kgrdbms/
 │   ├── sqlite.py   #   live engine (adapter over Graph)
 │   ├── postgres.py #   live engine (psycopg; jsonb + recursive CTEs); [postgres] extra
 │   └── neo4j.py    #   stub (deep-traversal escalation)
+├── rdf.py          # RDF boundary: Turtle/N-Triples export + import (RDF-star); rdflib only for [rdf] import
 ├── cli.py          # the `kg` command (stdlib argparse)
 └── mcp_server.py   # the MCP server (optional [mcp] extra)
 ```

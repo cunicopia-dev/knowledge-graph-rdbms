@@ -40,6 +40,10 @@ Tool surface (all prefixed kg_):
     kg_import             — bulk {nodes, edges} in ONE call (one batch; use this
                             to compose an ontology instead of N upsert calls)
 
+  rdf boundary
+    kg_rdf_export         — serialize an ontology to Turtle/N-Triples (RDF-star)
+    kg_rdf_import         — load RDF text back in (gated + logged, replayable)
+
   event log
     kg_events_tail        — most recent events
     kg_event_revert       — reverse an event via a compensating event
@@ -55,7 +59,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kgrdbms import resolver, service
+from kgrdbms import rdf, resolver, service
 from kgrdbms.graph import Edge, Node
 from kgrdbms.resolver import Resolved
 
@@ -363,6 +367,62 @@ def kg_import(
     """
     b = _bundle(ontology)
     res = service.import_graph(b.backend, b.events, nodes=nodes, edges=edges, actor=actor)
+    return {"ontology": b.entry.name, **res}
+
+
+# ---- RDF boundary: export / import ----------------------------------
+
+
+@mcp.tool()
+def kg_rdf_export(
+    format: str = "turtle",
+    edge_strategy: str = "rdf-star",
+    ontology: str | None = None,
+) -> dict:
+    """Serialize an ontology to RDF text (dependency-free).
+
+    Hand the result to any RDF store (Stardog, rdflib, Jena) to run SPARQL —
+    the LPG stays the store of record; RDF is just the boundary format.
+
+      format        — "turtle" (human-readable, default) or "ntriples" (lossless)
+      edge_strategy — how edge properties cross: "rdf-star" (quoted triples,
+                      default), "reification" (rdf:Statement), or "lossy"
+                      (bare triples; dropped count returned, never silent)
+
+    Node ids round-trip as CURIEs (person:ada <-> <https://kg.local/person/ada>).
+    Returns {ontology, format, triples, dropped_edge_props, rdf}.
+    """
+    b = _bundle(ontology)
+    ctx = rdf.IriContext(edge_strategy=edge_strategy)
+    triples = rdf.export_graph(b.backend, ctx)
+    text = rdf.to_turtle(triples, ctx) if format in ("turtle", "ttl") else rdf.to_ntriples(triples)
+    return {
+        "ontology": b.entry.name,
+        "format": format,
+        "triples": len(triples),
+        "dropped_edge_props": getattr(triples, "dropped_edge_props", 0),
+        "rdf": text,
+    }
+
+
+@mcp.tool()
+def kg_rdf_import(
+    text: str,
+    format: str = "ntriples",
+    edge_strategy: str = "rdf-star",
+    actor: str = "rdf-import",
+    ontology: str | None = None,
+) -> dict:
+    """Load RDF text into an ontology through the gated + logged path (replayable).
+
+    N-Triples import is dependency-free; Turtle import needs the [rdf] extra
+    (rdflib). `edge_strategy` must match how the RDF encoded its edges, so the
+    edge properties decode back onto the right edges. Returns
+    {ontology, nodes_imported, edges_imported}.
+    """
+    b = _bundle(ontology)
+    ctx = rdf.IriContext(edge_strategy=edge_strategy)
+    res = rdf.import_rdf(b.backend, b.events, text, fmt=format, ctx=ctx, actor=actor)
     return {"ontology": b.entry.name, **res}
 
 
