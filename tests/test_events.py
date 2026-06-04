@@ -154,3 +154,52 @@ def test_batch_op_is_replayable(tmp_path):
     assert g.node("n:1") is not None
     assert g.out("n:1", "LINK")
     g.close()
+
+
+# ---- regression: revert of an upsert is a TRUE inverse --------------
+
+
+def test_revert_upsert_removes_added_labels_and_props(tmp_path):
+    """An upsert that ADDS labels/props must, on revert, restore the node
+    exactly to its prior state — not merely overwrite changed values.
+    Regression for: compensation merged instead of replacing."""
+    from kgrdbms import service
+
+    g, log = _fresh(tmp_path)
+    service.upsert_node(g, log, id="t:1", kind="T", labels=["A"], properties={"color": "red"})
+    service.upsert_node(g, log, id="t:1", kind="T", labels=["B"],
+                        properties={"color": "blue", "size": "big"})
+    ev2 = log.tail(1)[0].id
+
+    service.revert_event(log, ev2)
+    n = g.node("t:1")
+    assert sorted(n.labels) == ["A"]                 # added label B removed
+    assert n.properties == {"color": "red"}          # added prop dropped, value restored
+
+
+def test_replay_after_revert_is_consistent(tmp_path):
+    """The new restore-state op must itself be replayable: rebuilding from the
+    log reproduces the post-revert state."""
+    from kgrdbms import service
+
+    g, log = _fresh(tmp_path)
+    service.upsert_node(g, log, id="t:1", kind="T", labels=["A"], properties={"color": "red"})
+    service.upsert_node(g, log, id="t:1", kind="T", labels=["B"], properties={"color": "blue"})
+    service.revert_event(log, log.tail(1)[0].id)
+
+    service.replay_log(g, log)
+    n = g.node("t:1")
+    assert sorted(n.labels) == ["A"] and n.properties == {"color": "red"}
+
+
+def test_resetting_existing_label_is_noop_not_logged(tmp_path):
+    """Re-adding a label a node already has must not log an event whose revert
+    would then remove the pre-existing label."""
+    from kgrdbms import service
+
+    g, log = _fresh(tmp_path)
+    service.upsert_node(g, log, id="t:1", kind="T", labels=["A"])
+    before = log.count()
+    service.set_label(g, log, "t:1", "A")            # already present -> no-op
+    assert log.count() == before                      # nothing logged
+    assert "A" in g.node("t:1").labels

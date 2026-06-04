@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
-![tests: 79 passing](https://img.shields.io/badge/tests-79_passing-brightgreen)
+![tests: 87 passing](https://img.shields.io/badge/tests-87_passing-brightgreen)
 ![storage: SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 

@@ -189,3 +189,25 @@ def test_rdf_export_lossy_reports_dropped(db, capsys):
     assert "rel/influences" in captured.out      # bare edge present
     assert "prop/since" not in captured.out       # property dropped
     assert "dropped" in captured.err              # but loudly, not silently
+
+
+# ---- regression: FK violations exit 1 cleanly, no traceback ---------
+
+
+def test_set_label_missing_node_exits_1(db, capsys):
+    assert run(db, "node", "add-label", "ghost:1", "L") == 1
+    err = capsys.readouterr().err
+    assert "does not exist" in err and "Traceback" not in err
+
+
+def test_set_prop_missing_node_exits_1(db, capsys):
+    assert run(db, "node", "set-prop", "ghost:1", "k", "1") == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_edge_add_missing_endpoint_exits_1(db, capsys):
+    run(db, "node", "add", "x:1", "--kind", "T")
+    capsys.readouterr()
+    assert run(db, "edge", "add", "x:1", "y:1", "LINK") == 1
+    err = capsys.readouterr().err
+    assert "to node 'y:1' does not exist" in err and "Traceback" not in err
