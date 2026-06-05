@@ -42,6 +42,18 @@ Tool surface (all prefixed kg_):
     kg_import             — bulk {nodes, edges} in ONE call (one batch; use this
                             to compose an ontology instead of N upsert calls)
 
+  federation (read across many ontologies at once — multithreaded fan-out)
+    kg_federated_schema       — union vocabulary across ontologies
+    kg_federated_stats        — node/edge totals across ontologies
+    kg_federated_nodes_by_kind/_by_label — nodes across ontologies, tagged by source
+    kg_federated_node         — find an id across the federation (identity-aware)
+    kg_identity               — materialized SAME_AS cluster of a node
+
+  backbone (cross-ontology links + the prefix/IRI registry)
+    kg_link / kg_same_as      — relate nodes that live in DIFFERENT ontologies
+    kg_links_of               — cross-ontology links touching a node
+    kg_prefix_add / kg_prefixes / kg_expand — CURIE prefix -> IRI registry
+
   rdf boundary
     kg_rdf_export         — serialize an ontology to Turtle/N-Triples (RDF-star)
     kg_rdf_import         — load RDF text back in (gated + logged, replayable)
@@ -61,7 +73,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kgrdbms import rdf, resolver, service
+from kgrdbms import backbone, rdf, resolver, service
+from kgrdbms.federation import FederatedNode, Federation, Located
 from kgrdbms.graph import Edge, Node
 from kgrdbms.resolver import Resolved
 
@@ -125,6 +138,15 @@ def _edge_to_dict(e: Edge) -> dict:
         "type": e.type,
         "properties": e.properties,
     }
+
+
+def _located_to_dict(l: Located) -> dict:
+    return {"ontology": l.ontology, "node": _node_to_dict(l.node)}
+
+
+def _federation(ontologies: list[str] | None) -> Federation:
+    """A Federation over the named ontologies, or every registered one."""
+    return Federation(list(ontologies)) if ontologies else Federation.all()
 
 
 # =====================================================================
@@ -449,6 +471,134 @@ def kg_rdf_import(
     ctx = rdf.IriContext(edge_strategy=edge_strategy)
     res = rdf.import_rdf(b.backend, b.events, text, fmt=format, ctx=ctx, actor=actor)
     return {"ontology": b.entry.name, **res}
+
+
+# =====================================================================
+# FEDERATION — read across many ontologies at once (multithreaded fan-out)
+# =====================================================================
+#
+# Each ontology is a separate file; a federated read fans out across them
+# concurrently and merges the results tagged by source. `ontologies` selects
+# members (omit for every registered ontology). Reads only — cross-ontology
+# writes are the backbone tools below.
+
+
+@mcp.tool()
+def kg_federated_schema(samples: bool = False, ontologies: list[str] | None = None) -> dict:
+    """Union schema across many ontologies — every kind, edge type, label, and
+    property-key (summed) plus each member's own schema. The cross-ontology
+    analogue of kg_schema; call it to see your whole world's vocabulary at once."""
+    return _federation(ontologies).schema(samples=samples)
+
+
+@mcp.tool()
+def kg_federated_stats(ontologies: list[str] | None = None) -> dict:
+    """Node/edge totals across the federation, with a per-ontology breakdown."""
+    return _federation(ontologies).stats()
+
+
+@mcp.tool()
+def kg_federated_nodes_by_kind(kind: str, ontologies: list[str] | None = None) -> list[dict]:
+    """All nodes of a kind across every ontology, each tagged with its source
+    ontology ({ontology, node})."""
+    return [_located_to_dict(l) for l in _federation(ontologies).nodes_by_kind(kind)]
+
+
+@mcp.tool()
+def kg_federated_nodes_by_label(label: str, ontologies: list[str] | None = None) -> list[dict]:
+    """All nodes carrying a label across every ontology, tagged by source."""
+    return [_located_to_dict(l) for l in _federation(ontologies).nodes_by_label(label)]
+
+
+@mcp.tool()
+def kg_federated_node(id: str, ontologies: list[str] | None = None) -> dict:
+    """Find a node id across the federation (identity-aware).
+
+    Returns every occurrence tagged by ontology. Copies in `shared_identity`
+    ontologies are merged into one `merged` entity (labels unioned, properties
+    merged); local-identity copies stay separate. Returns
+    {id, occurrences, shared, merged}.
+    """
+    fn: FederatedNode = _federation(ontologies).node(id)
+    return {
+        "id": fn.id,
+        "occurrences": [_located_to_dict(l) for l in fn.occurrences],
+        "shared": fn.shared,
+        "merged": _node_to_dict(fn.merged),
+    }
+
+
+@mcp.tool()
+def kg_identity(ontology: str, id: str, ontologies: list[str] | None = None) -> list[dict]:
+    """The materialized SAME_AS cluster of a node — every leaf node explicitly
+    asserted (transitively) to be the same real-world entity, fetched live and
+    tagged by ontology. Pairs with kg_same_as / kg_link."""
+    return [_located_to_dict(l) for l in _federation(ontologies).identity(ontology, id)]
+
+
+# =====================================================================
+# BACKBONE — cross-ontology links + the prefix/IRI registry
+# =====================================================================
+#
+# A leaf edge can't cross ontologies (its foreign key is within one file); a
+# backbone link can. Links live in the index graph as Ref proxy nodes joined by
+# edges, written through the same gated + logged path. The prefix registry is
+# the lightweight identity backbone (CURIE prefix -> IRI base).
+
+
+@mcp.tool()
+def kg_link(
+    from_ontology: str,
+    from_id: str,
+    type: str,
+    to_ontology: str,
+    to_id: str,
+    properties: dict[str, Any] | None = None,
+    symmetric: bool = False,
+    actor: str = "backbone",
+) -> dict:
+    """Assert a typed relationship between nodes in two DIFFERENT ontologies
+    (impossible as a normal edge — those can't cross files). symmetric=True also
+    writes the reverse. Gated + logged in the index's event log."""
+    return backbone.link(from_ontology, from_id, type, to_ontology, to_id,
+                         properties=properties, symmetric=symmetric, actor=actor)
+
+
+@mcp.tool()
+def kg_same_as(
+    from_ontology: str, from_id: str, to_ontology: str, to_id: str, actor: str = "backbone"
+) -> dict:
+    """Assert two leaf nodes in different ontologies are the same real-world
+    entity (a symmetric SAME_AS link). Read the cluster back with kg_identity."""
+    return backbone.same_as(from_ontology, from_id, to_ontology, to_id, actor=actor)
+
+
+@mcp.tool()
+def kg_links_of(ontology: str, id: str, type: str | None = None) -> list[dict]:
+    """Every cross-ontology link touching a node (both directions)."""
+    return [
+        {"direction": l.direction, "type": l.type, "ontology": l.other_ontology,
+         "id": l.other_id, "properties": l.properties}
+        for l in backbone.links_of(ontology, id, type=type)
+    ]
+
+
+@mcp.tool()
+def kg_prefix_add(prefix: str, iri_base: str, actor: str = "backbone") -> dict:
+    """Bind a CURIE prefix to an IRI base (e.g. person -> https://kg.local/person/)."""
+    return backbone.register_prefix(prefix, iri_base, actor=actor)
+
+
+@mcp.tool()
+def kg_prefixes() -> dict:
+    """All registered prefix -> IRI-base bindings."""
+    return backbone.prefixes()
+
+
+@mcp.tool()
+def kg_expand(curie: str) -> dict:
+    """Expand a CURIE to its full IRI via the prefix registry ({curie, iri})."""
+    return {"curie": curie, "iri": backbone.expand(curie)}
 
 
 # ---- event log: read + reversal + replay ----------------------------

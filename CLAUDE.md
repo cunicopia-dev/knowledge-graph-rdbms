@@ -26,6 +26,11 @@ kg schema --samples                      # + example ids and enum-like property 
 kg ontology list                         # the registry (the "db of dbs")
 kg ontology create coffee --stance inferential   # register a named ontology
 kg --ontology coffee node add drink:latte --kind Drink   # route to it (resolver)
+kg fed schema                            # union vocabulary across ALL ontologies (multithreaded fan-out)
+kg fed node person:ada                   # find an id across the federation (identity-aware)
+kg link add coffee drink:latte ENJOYED_BY people person:ada   # cross-ontology edge (backbone)
+kg link same-as people person:ada wiki person:ada-lovelace    # assert same real-world entity
+kg prefix add person https://kg.local/person/   # CURIE prefix -> IRI (identity backbone)
 kg --db /tmp/x.db node add a:1 --kind T  # raw escape hatch: exact file, no registry
 kg serve                                 # run the MCP server (needs [mcp] extra)
 ```
@@ -68,6 +73,15 @@ The engine above (`graph.py` + `service.py` + the log + the gate) operates on **
 - **The event log is decoupled from the backend.** `EventLog(store, projection=None)`: *store* is the SQLite that holds the log rows; *projection* is the `GraphBackend` that `compensate()`/replay apply to. They coincide for sqlite (`EventLog(graph)` — projection defaults to store, unchanged). For postgres the store is `resolver._ControlPlaneLogStore` (a `<root>/ontologies/<slug>/events.db` sidecar) and the projection is the `PostgresGraph` — so audit/replay/undo keep working with graph data in Postgres and history in SQLite. `apply_event` only calls `GraphBackend` methods, so it drives any backend. This store↔projection split is the seam to respect for *any* non-sqlite engine (neo4j next).
 - **New failure class:** routing to a stub engine raises `NotImplementedError`. Every front door's error handling must account for it (the CLI's `main()` already maps it to `unavailable: …` / exit 1).
 
+## Cross-ontology: federation (reads) + the backbone (links)
+
+The control plane routes to **one** ontology per call. Two modules sit on top to work across **many** at once — and the split is deliberate: reads federate, writes go through a backbone.
+
+- **`federation.py` — cross-ontology READS, multithreaded by default.** A federated read is a *fan-out*: open each member ontology in its own thread (own connection — SQLite/psycopg release the GIL during a query, so N ontologies read concurrently) and merge the results tagged by source. `Federation(names)` or `Federation.all()`; methods mirror the single-graph reads (`schema`, `stats`, `nodes_by_kind`, `nodes_by_label`, `node`) plus `identity()`. Each worker calls `resolver.resolve()` in its *own* thread, so no connection is ever shared across threads. `parallel=False` forces sequential for debugging. **Federation never writes** and never silently drops a member (a member that raises propagates).
+- **`backbone.py` — cross-ontology LINKS + the prefix registry.** A leaf edge can't cross ontologies (its FK lives in one file). The backbone is where cross-ontology structure lives, and **it needs no new storage: it IS the index graph** (`<root>/index.db`) growing new kinds. A link becomes a `Ref` proxy node per endpoint (id = `<ontology>::<node_id>`, FK-satisfied inside the index) joined by an edge; the prefix registry becomes `Prefix` nodes. **Both go through the gated + logged `service` path against the index's own event log** — so cross-domain assertions (`link`, `same_as`) are audited, reversible, and replayable exactly like leaf data. `SAME_AS` is symmetric and traversed transitively by `identity_cluster()`.
+- **Identity is opt-in per ontology.** `OntologyEntry.shared_identity` (default `False` = local): when `True`, federation treats same-CURIE nodes across such ontologies as the *same* entity and merges them in `Federation.node()`. Everyone else stays local — link explicitly via the backbone. This is the lightweight LPG answer to RDF's global-IRI identity: stay local by default, adopt shared identity surgically.
+- **The qualified-id delimiter is `::`** (`coffee::drink:latte`), distinct from the single-colon CURIE so a node's own colons survive `unqualify()`. Don't reuse `:`.
+
 ## Layout
 
 ```
@@ -78,6 +92,8 @@ kgrdbms/
 ├── invariants.py   # compiled-in invariants, run before policy (no-op default)
 ├── service.py      # the shared gated + logged write path (all front doors use this)
 ├── resolver.py     # control plane: name → (backend, events, entry); the ontology index
+├── federation.py   # cross-ontology READS: multithreaded fan-out, identity-aware merge
+├── backbone.py     # cross-ontology LINKS + prefix/IRI registry (lives in the index graph)
 ├── backends/       # pluggable data plane (engine registry)
 │   ├── base.py     #   GraphBackend Protocol + _StubBackend
 │   ├── __init__.py #   registry: @backend(name), get_backend, available_backends
@@ -88,7 +104,7 @@ kgrdbms/
 └── mcp_server.py   # MCP server, kg_-prefixed tools, each with optional `ontology=` (optional [mcp] extra)
 ```
 
-`graph.py` has no internal dependencies — everything else layers on top of it. Dependency direction: `graph` ← `events`/`backends` ← `resolver` ← `service`-callers (`cli`, `mcp_server`). `service.py` depends only on the `GraphBackend` surface, never a concrete engine. Public API is re-exported from `__init__.py`.
+`graph.py` has no internal dependencies — everything else layers on top of it. Dependency direction: `graph` ← `events`/`backends` ← `resolver` ← `backbone`/`federation` ← `service`-callers (`cli`, `mcp_server`). `backbone` builds on `resolver` + `service` (the index is its store); `federation` builds on `resolver` (+ `backbone` for identity clusters). `service.py` depends only on the `GraphBackend` surface, never a concrete engine. Public API is re-exported from `__init__.py`.
 
 ## Node id convention (CURIEs)
 

@@ -231,3 +231,27 @@ def test_schema_samples_human_shows_enum_values(db, capsys):
     assert run(db, "schema", "--samples") == 0
     out = capsys.readouterr().out
     assert "importance" in out and "high" in out and "low" in out
+
+
+def test_federation_link_prefix_cli(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("KGRDBMS_HOME", str(tmp_path))
+    assert main(["ontology", "create", "coffee"]) == 0
+    assert main(["ontology", "create", "people", "--shared-identity"]) == 0
+    assert main(["--ontology", "coffee", "node", "add", "drink:latte", "--kind", "Drink"]) == 0
+    assert main(["--ontology", "people", "node", "add", "person:ada", "--kind", "Person"]) == 0
+    capsys.readouterr()
+
+    assert main(["link", "add", "coffee", "drink:latte", "ENJOYED_BY", "people", "person:ada"]) == 0
+    assert "ENJOYED_BY" in capsys.readouterr().out
+
+    assert main(["--json", "fed", "schema"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["merged"]["kinds"]["Drink"] == 1 and payload["merged"]["kinds"]["Person"] == 1
+
+    assert main(["--json", "link", "of", "coffee", "drink:latte"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["ontology"] == "people"
+
+    assert main(["prefix", "add", "person", "https://kg.local/person/"]) == 0
+    capsys.readouterr()
+    assert main(["prefix", "expand", "person:ada"]) == 0
+    assert "https://kg.local/person/ada" in capsys.readouterr().out

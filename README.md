@@ -737,7 +737,16 @@ replayable.
 | `kg rdf export [--format F]`    | serialize to Turtle/N-Triples (RDF-star)      |
 | `kg rdf import FILE`            | load RDF back in (gated + logged)             |
 | `kg ontology list`              | list registered ontologies (the registry)     |
-| `kg ontology create NAME …`     | register an ontology (`--backend`, `--stance`) |
+| `kg ontology create NAME …`     | register an ontology (`--backend`, `--stance`, `--shared-identity`) |
+| `kg fed schema [--samples]`     | union vocabulary across ALL ontologies (multithreaded fan-out) |
+| `kg fed nodes-by-kind KIND`     | nodes of a kind across ontologies, tagged by source |
+| `kg fed node ID`                | find an id across the federation (identity-aware) |
+| `kg link add FROM_ONT FROM TYPE TO_ONT TO` | cross-ontology edge (the backbone) |
+| `kg link same-as A FROM B TO`   | assert two nodes are the same entity (symmetric) |
+| `kg link of ONT ID`             | cross-ontology links touching a node          |
+| `kg link cluster ONT ID`        | the transitive SAME_AS identity cluster       |
+| `kg prefix add P IRI_BASE`      | bind a CURIE prefix to an IRI base            |
+| `kg prefix expand CURIE` / `contract IRI` | CURIE ↔ IRI via the registry        |
 | `kg serve [--transport T]`      | run the MCP server                            |
 
 Add `--json` to any command for machine-readable output. Target a graph with

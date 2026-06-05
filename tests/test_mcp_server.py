@@ -62,6 +62,30 @@ def test_nodes_by_kind_and_label(mcp_mod):
     assert tagged == {"a:1", "b:1"}
 
 
+def test_federation_and_backbone_tools(mcp_mod):
+    # two ontologies, one node each, linked across the boundary
+    mcp_mod.kg_node_upsert(id="drink:latte", kind="Drink", name="Latte", ontology="coffee")
+    mcp_mod.kg_node_upsert(id="person:ada", kind="Person", name="Ada", ontology="people")
+    sch = mcp_mod.kg_federated_schema()
+    assert sch["merged"]["kinds"].get("Drink") == 1 and sch["merged"]["kinds"].get("Person") == 1
+
+    by_kind = mcp_mod.kg_federated_nodes_by_kind("Person")
+    assert any(r["ontology"] == "people" and r["node"]["id"] == "person:ada" for r in by_kind)
+
+    mcp_mod.kg_link("coffee", "drink:latte", "ENJOYED_BY", "people", "person:ada",
+                    properties={"since": 2020})
+    links = mcp_mod.kg_links_of("coffee", "drink:latte")
+    assert links[0]["type"] == "ENJOYED_BY" and links[0]["ontology"] == "people"
+
+    mcp_mod.kg_same_as("coffee", "drink:latte", "people", "person:ada")
+    cluster = mcp_mod.kg_identity("coffee", "drink:latte")
+    assert {(r["ontology"], r["node"]["id"]) for r in cluster} == {
+        ("coffee", "drink:latte"), ("people", "person:ada")}
+
+    mcp_mod.kg_prefix_add("person", "https://kg.local/person/")
+    assert mcp_mod.kg_expand("person:ada")["iri"] == "https://kg.local/person/ada"
+
+
 def test_schema_exposes_vocabulary(mcp_mod):
     mcp_mod.kg_node_upsert(id="a:1", kind="A", name="1", labels=["Tagged"],
                            properties={"status": "active"})

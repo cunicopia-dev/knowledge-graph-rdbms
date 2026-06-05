@@ -69,6 +69,12 @@ class OntologyEntry:
     stance: str = "literal"                      # extraction opinion: literal | inferential | ...
     id_convention: str = "kind:slug"             # how the composer mints node ids
     allowed_kinds: list[str] = field(default_factory=list)  # empty = open / unconstrained
+    shared_identity: bool = False                # identity stance: do same-CURIE nodes in
+    #                                              this ontology denote the same entity as in
+    #                                              *other* shared_identity ontologies? Default
+    #                                              False = local identity (link explicitly via
+    #                                              the backbone). True = global: federation
+    #                                              merges same-id nodes across such ontologies.
 
     @classmethod
     def from_node(cls, node: Node) -> "OntologyEntry":
@@ -81,6 +87,7 @@ class OntologyEntry:
             stance=p.get("stance", "literal"),
             id_convention=p.get("id_convention", "kind:slug"),
             allowed_kinds=list(p.get("allowed_kinds", [])),
+            shared_identity=bool(p.get("shared_identity", False)),
         )
 
     def to_properties(self) -> dict[str, Any]:
@@ -165,6 +172,7 @@ def register(
     stance: str = "literal",
     id_convention: str = "kind:slug",
     allowed_kinds: list[str] | None = None,
+    shared_identity: bool = False,
 ) -> OntologyEntry:
     """Add (or update) an ontology in the index. Writes go direct — the registry
     is control-plane bookkeeping, not gated user data."""
@@ -181,6 +189,7 @@ def register(
         stance=stance,
         id_convention=id_convention,
         allowed_kinds=allowed_kinds or [],
+        shared_identity=shared_identity,
     )
     idx = _open_index(root)
     try:
