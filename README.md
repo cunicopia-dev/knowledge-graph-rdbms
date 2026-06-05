@@ -738,6 +738,7 @@ replayable.
 | `kg rdf import FILE`            | load RDF back in (gated + logged)             |
 | `kg ontology list`              | list registered ontologies (the registry)     |
 | `kg ontology create NAME …`     | register an ontology (`--backend`, `--stance`, `--shared-identity`) |
+| `kg ontology delete NAME [--purge]` | deregister an ontology (`--purge` also deletes its data) |
 | `kg fed schema [--samples]`     | union vocabulary across ALL ontologies (multithreaded fan-out) |
 | `kg fed nodes-by-kind KIND`     | nodes of a kind across ontologies, tagged by source |
 | `kg fed node ID`                | find an id across the federation (identity-aware) |

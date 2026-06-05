@@ -233,6 +233,33 @@ def test_schema_samples_human_shows_enum_values(db, capsys):
     assert "importance" in out and "high" in out and "low" in out
 
 
+def test_ontology_delete_deregisters_and_purges(tmp_path, monkeypatch, capsys):
+    import os
+    monkeypatch.setenv("KGRDBMS_HOME", str(tmp_path))
+    assert main(["ontology", "create", "coffee"]) == 0
+    assert main(["--ontology", "coffee", "node", "add", "drink:latte", "--kind", "Drink"]) == 0
+    data_file = tmp_path / "ontologies" / "coffee" / "graph.db"
+    assert data_file.exists()
+    capsys.readouterr()
+
+    # deregister only: gone from registry, file preserved
+    assert main(["ontology", "delete", "coffee"]) == 0
+    capsys.readouterr()  # discard the delete message before reading the list JSON
+    assert main(["--json", "ontology", "list"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert data_file.exists()
+
+    # deleting a missing ontology is exit 1
+    assert main(["ontology", "delete", "ghost"]) == 1
+    capsys.readouterr()
+
+    # recreate then purge: file removed from disk
+    assert main(["ontology", "create", "coffee"]) == 0
+    assert main(["--ontology", "coffee", "node", "add", "drink:latte", "--kind", "Drink"]) == 0
+    assert main(["ontology", "delete", "coffee", "--purge"]) == 0
+    assert not (tmp_path / "ontologies" / "coffee").exists()
+
+
 def test_federation_link_prefix_cli(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("KGRDBMS_HOME", str(tmp_path))
     assert main(["ontology", "create", "coffee"]) == 0

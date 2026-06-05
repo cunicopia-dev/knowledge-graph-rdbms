@@ -62,6 +62,16 @@ def test_nodes_by_kind_and_label(mcp_mod):
     assert tagged == {"a:1", "b:1"}
 
 
+def test_ontology_delete_tool(mcp_mod):
+    mcp_mod.kg_ontology_create(name="coffee")
+    mcp_mod.kg_node_upsert(id="drink:latte", kind="Drink", name="Latte", ontology="coffee")
+    assert any(o["name"] == "coffee" for o in mcp_mod.kg_ontologies_list())
+    res = mcp_mod.kg_ontology_delete("coffee")
+    assert res["deregistered"] is True
+    assert all(o["name"] != "coffee" for o in mcp_mod.kg_ontologies_list())
+    assert mcp_mod.kg_ontology_delete("ghost")["deregistered"] is False
+
+
 def test_federation_and_backbone_tools(mcp_mod):
     # two ontologies, one node each, linked across the boundary
     mcp_mod.kg_node_upsert(id="drink:latte", kind="Drink", name="Latte", ontology="coffee")

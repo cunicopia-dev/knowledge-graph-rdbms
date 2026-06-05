@@ -388,6 +388,17 @@ def cmd_ontology_create(app: App, args) -> int:
     return 0
 
 
+def cmd_ontology_delete(app: App, args) -> int:
+    res = resolver.unregister(args.name, purge=args.purge)
+    if not res["deregistered"]:
+        print(f"no ontology {args.name!r}", file=sys.stderr)
+        app.emit(res, "")
+        return 1
+    note = " (data purged from disk)" if res["purged"] else " (data left on disk)"
+    app.emit(res, f"deregistered ontology {args.name!r}{note}")
+    return 0
+
+
 def cmd_node_get(app: App, args) -> int:
     n = app.graph.node(args.id)
     if n is None:
@@ -723,6 +734,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="same-CURIE nodes here denote the same entity as in other shared-identity "
                         "ontologies (federation merges them); default is local identity")
     a.set_defaults(func=cmd_ontology_create)
+    a = ont.add_parser("delete", help="remove an ontology from the registry (--purge also deletes its data)")
+    a.add_argument("name")
+    a.add_argument("--purge", action="store_true",
+                   help="also delete the on-disk data file (destructive, irreversible)")
+    a.set_defaults(func=cmd_ontology_delete)
 
     # ---- node group ----
     node = sub.add_parser("node", help="node operations").add_subparsers(dest="action", required=True)

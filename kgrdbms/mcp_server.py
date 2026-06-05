@@ -18,6 +18,7 @@ Tool surface (all prefixed kg_):
   control plane
     kg_ontologies_list    — registered ontologies (the "database of databases")
     kg_ontology_create    — register a new ontology (name, backend, opinion)
+    kg_ontology_delete    — deregister an ontology (purge=True also deletes data)
 
   reads
     kg_stats              — node/edge counts, the db path, the active ontology
@@ -201,6 +202,20 @@ def kg_ontology_create(
         "description": entry.description,
         "path": entry.path,
     }
+
+
+@mcp.tool()
+def kg_ontology_delete(name: str, purge: bool = False) -> dict:
+    """Remove an ontology from the registry (inverse of kg_ontology_create).
+
+    By default only deregisters — the data file is left on disk and the ontology
+    can be recreated intact. purge=True also deletes the on-disk SQLite file
+    (destructive, irreversible). External (postgres) databases are never dropped
+    from here. Returns {name, deregistered, purged}.
+    """
+    res = resolver.unregister(name, purge=purge)
+    _BUNDLES.pop(name, None)  # drop any cached bundle for the removed ontology
+    return res
 
 
 # =====================================================================

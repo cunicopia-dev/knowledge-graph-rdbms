@@ -205,6 +205,45 @@ def register(
     return entry
 
 
+def unregister(name: str, *, root: str | Path | None = None, purge: bool = False) -> dict:
+    """Remove an ontology from the index (the symmetric inverse of `register`).
+
+    By default this only *deregisters* — the entry is deleted from the index but
+    the ontology's data file is left on disk, so the ontology can be re-registered
+    and reopened intact. `purge=True` additionally deletes the on-disk SQLite file
+    (and its WAL/SHM sidecars) and the ontology's managed directory — destructive
+    and irreversible, so it's a separate, explicit opt-in.
+
+    Postgres/other engines: the registry entry and the control-plane log sidecar
+    are removed; the external database itself is never dropped from here.
+    Returns {name, deregistered, purged}.
+    """
+    entry = get_entry(name, root)
+    if entry is None:
+        return {"name": name, "deregistered": False, "purged": False}
+    idx = _open_index(root)
+    try:
+        idx.delete_node(f"ontology:{slug(name)}")
+    finally:
+        idx.close()
+    purged = False
+    if purge:
+        import shutil
+
+        managed_dir = ontologies_root(root) / "ontologies" / slug(name)
+        if managed_dir.exists():
+            shutil.rmtree(managed_dir, ignore_errors=True)
+            purged = True
+        if entry.backend == "sqlite":
+            base = Path(entry.path)
+            for suffix in ("", "-wal", "-shm"):
+                f = Path(str(base) + suffix)
+                if f.exists():
+                    f.unlink()
+                    purged = True
+    return {"name": name, "deregistered": True, "purged": purged}
+
+
 # ---- backend routing: the control-plane switch -----------------------
 
 
