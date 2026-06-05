@@ -573,7 +573,7 @@ that data by `bench/charts.py`. Run both on your own machine in one command.
 
 ### Writes — the batching lever
 
-![Write throughput — batch the commit, ~10× faster](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/master/assets/write_throughput.png)
+![Write throughput — batch the commit, ~10× faster](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/main/assets/write_throughput.png)
 
 Each single write commits on its own for durability. Wrapping a bulk load in
 `batch()` / `add_nodes` / `add_edges` collapses those per-call commits into one
@@ -584,7 +584,7 @@ thousands per second.
 
 ### Reads — fast, with an honest tail
 
-![Read latency — p50 marker, whisker to p99, log scale](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/master/assets/read_latency.png)
+![Read latency — p50 marker, whisker to p99, log scale](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/main/assets/read_latency.png)
 
 Point lookups land in single-digit microseconds, and multi-node reads hydrate
 the whole result set in a constant number of queries (no N+1 fan-out). The chart
@@ -598,7 +598,7 @@ SQLite engine runs under CPython, Node, and Bun, so the gap between them is pure
 binding overhead — under 2×, and it doesn't even favor one runtime across
 operations.
 
-![Same SQLite across CPython, Node, and Bun](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/master/assets/runtimes.png)
+![Same SQLite across CPython, Node, and Bun](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/main/assets/runtimes.png)
 
 The lever that actually moved the needle was transaction batching (~10×, above),
 not the language. Reproduce it with `python bench/runtimes/compare.py`.
@@ -608,7 +608,7 @@ not the language. Reproduce it with `python bench/runtimes/compare.py`.
 We measured it against Neo4j — same graph, same queries, identical methodology
 (full harness and reproduction in [`bench/neo4j/`](bench/neo4j/README.md)):
 
-![Where the crossover is — kgrdbms vs Neo4j](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/master/assets/crossover.png)
+![Where the crossover is — kgrdbms vs Neo4j](https://raw.githubusercontent.com/cunicopia-dev/knowledge-graph-rdbms/main/assets/crossover.png)
 
 Queries compile to SQL over B-tree indexes, so each traversal hop is an index
 lookup — wonderfully cheap for point reads and shallow traversals. An in-process

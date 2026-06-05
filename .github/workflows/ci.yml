@@ -1,14 +1,14 @@
 name: CI
 
-# Runs the test suite on every push to master and every pull request.
+# Runs the test suite on every push to main and every pull request.
 # Make the `ci` job below a required status check in branch protection to
 # gate merges on a green suite.
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
