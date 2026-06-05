@@ -18,29 +18,33 @@ Tool surface (all prefixed kg_):
   control plane
     kg_ontologies_list    — registered ontologies (the "database of databases")
     kg_ontology_create    — register a new ontology (name, backend, opinion)
+    kg_ontology_delete    — deregister an ontology (purge=True also deletes data)
 
-  reads
-    kg_stats              — node/edge counts, the db path, the active ontology
-    kg_schema             — observed vocabulary (kinds, edge types, labels, keys);
-                            read this FIRST to query without guessing
-    kg_node_get           — fetch a node by id
-    kg_nodes_by_kind      — list all nodes of a kind
-    kg_nodes_by_label     — list all nodes carrying a label
-    kg_edges_out          — outbound edges of a node
-    kg_edges_in           — inbound edges of a node
+  reads (each takes optional `ontologies=[...]` to fan out across many — one
+         multithreaded read instead of a separate federated tool family)
+    kg_schema             — observed vocabulary + totals; read this FIRST to
+                            query without guessing
+    kg_node_get           — fetch a node by id (identity-aware across `ontologies`)
+    kg_find               — nodes by kind and/or label, tagged by ontology
+    kg_edges              — edges of a node (direction = out | in | both)
     kg_neighborhood       — undirected BFS within depth
     kg_shortest_path      — shortest path between two ids
     kg_descendants        — recursive walk along one edge type
 
   writes (gated: invariants.enforce THEN policy.mutation_check)
-    kg_node_upsert        — create or update a node
-    kg_node_set_label     — add a label to a node
-    kg_node_set_property  — set a property on a node
+    kg_node_upsert        — create/update a node (also adds labels / sets properties)
     kg_node_delete        — delete a node and its edges
     kg_edge_add           — add a (from, type, to) edge
     kg_edge_remove        — remove a (from, type, to) edge
     kg_import             — bulk {nodes, edges} in ONE call (one batch; use this
                             to compose an ontology instead of N upsert calls)
+
+  cross-ontology (the backbone; federated reads fold into the reads above)
+    kg_link               — relate nodes in DIFFERENT ontologies (SAME_AS too)
+    kg_links_of           — cross-ontology links touching a node
+    kg_identity           — materialized SAME_AS cluster of a node
+    kg_prefix_add         — bind a CURIE prefix to an IRI base
+    kg_prefix_resolve     — expand a CURIE, or list all prefix bindings
 
   rdf boundary
     kg_rdf_export         — serialize an ontology to Turtle/N-Triples (RDF-star)
@@ -61,7 +65,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kgrdbms import rdf, resolver, service
+from kgrdbms import backbone, rdf, resolver, service
+from kgrdbms.federation import FederatedNode, Federation, Located
 from kgrdbms.graph import Edge, Node
 from kgrdbms.resolver import Resolved
 
@@ -127,6 +132,15 @@ def _edge_to_dict(e: Edge) -> dict:
     }
 
 
+def _located_to_dict(l: Located) -> dict:
+    return {"ontology": l.ontology, "node": _node_to_dict(l.node)}
+
+
+def _federation(ontologies: list[str] | None) -> Federation:
+    """A Federation over the named ontologies, or every registered one."""
+    return Federation(list(ontologies)) if ontologies else Federation.all()
+
+
 # =====================================================================
 # CONTROL PLANE — the registry of ontologies (itself a kg)
 # =====================================================================
@@ -181,84 +195,114 @@ def kg_ontology_create(
     }
 
 
+@mcp.tool()
+def kg_ontology_delete(name: str, purge: bool = False) -> dict:
+    """Remove an ontology from the registry (inverse of kg_ontology_create).
+
+    By default only deregisters — the data file is left on disk and the ontology
+    can be recreated intact. purge=True also deletes the on-disk SQLite file
+    (destructive, irreversible). External (postgres) databases are never dropped
+    from here. Returns {name, deregistered, purged}.
+    """
+    res = resolver.unregister(name, purge=purge)
+    _BUNDLES.pop(name, None)  # drop any cached bundle for the removed ontology
+    return res
+
+
 # =====================================================================
 # READS
 # =====================================================================
 
 
 @mcp.tool()
-def kg_stats(ontology: str | None = None) -> dict:
-    """Counts of nodes by kind and edges by type, plus totals, the db path, and
-    which ontology/backend served the call."""
-    b = _bundle(ontology)
-    return {
-        "ontology": b.entry.name,
-        "backend": b.entry.backend,
-        "nodes_total": b.backend.total_nodes(),
-        "edges_total": b.backend.total_edges(),
-        "nodes_by_kind": b.backend.count_nodes_by_kind(),
-        "edges_by_type": b.backend.count_edges_by_type(),
-        "db_path": b.entry.path,
-    }
+def kg_schema(
+    samples: bool = False, ontology: str | None = None, ontologies: list[str] | None = None
+) -> dict:
+    """The observed schema — CALL THIS FIRST when you don't know what an ontology
+    contains, before kg_find / kg_node_get. Returns the exact vocabulary so you
+    never guess: kinds, edge types, labels, property keys per kind (+counts), and
+    node/edge totals.
 
-
-@mcp.tool()
-def kg_schema(samples: bool = False, ontology: str | None = None) -> dict:
-    """The observed schema of an ontology — CALL THIS FIRST when you don't already
-    know what an ontology contains, before kg_nodes_by_kind / kg_nodes_by_label /
-    kg_node_get. It tells you the exact vocabulary so you never have to guess.
-
-    Returns:
-      - kinds            — every node `kind` and its count
-      - edge_types       — every edge `type` and its count
-      - labels           — every label and its count
-      - node_keys_by_kind— for each kind, which property keys its nodes carry (+counts)
-      - edge_keys        — property keys that appear on edges
-
-    With samples=True, also returns per kind a few example node ids (showing the
-    id/CURIE convention) and, for enum-like properties, the set of distinct values
-    a key takes (free-text keys are left un-enumerated). Read-only; cheap.
+    Scope: omit `ontologies` (optionally set a single `ontology`) for one graph.
+    Pass `ontologies=[...]` to fan out across many at once (multithreaded) — you
+    get a unioned `merged` schema plus each member's own under `by_ontology`.
+    samples=True adds example ids + enum-like property values per kind.
     """
+    if ontologies:
+        return _federation(ontologies).schema(samples=samples)
     return _bundle(ontology).backend.schema(samples=samples)
 
 
 @mcp.tool()
-def kg_node_get(id: str, ontology: str | None = None) -> dict | None:
-    """Fetch a single node by id."""
+def kg_node_get(
+    id: str, ontology: str | None = None, ontologies: list[str] | None = None
+) -> dict | None:
+    """Fetch a node by id. One graph: returns the node, or null if absent.
+
+    Pass `ontologies=[...]` to look the id up across the federation, identity-aware:
+    returns {id, occurrences:[{ontology, node}], shared, merged} where copies in
+    shared-identity ontologies are merged into one `merged` entity.
+    """
+    if ontologies:
+        fn: FederatedNode = _federation(ontologies).node(id)
+        return {
+            "id": fn.id,
+            "occurrences": [_located_to_dict(l) for l in fn.occurrences],
+            "shared": fn.shared,
+            "merged": _node_to_dict(fn.merged),
+        }
     return _node_to_dict(_bundle(ontology).backend.node(id))
 
 
 @mcp.tool()
-def kg_nodes_by_kind(kind: str, ontology: str | None = None) -> list[dict]:
-    """List all nodes of a given kind."""
-    return [_node_to_dict(n) for n in _bundle(ontology).backend.nodes_by_kind(kind)]
+def kg_find(
+    kind: str | None = None,
+    label: str | None = None,
+    ontology: str | None = None,
+    ontologies: list[str] | None = None,
+) -> list[dict]:
+    """Find nodes by `kind` and/or `label`, each tagged with its source ontology
+    ([{ontology, node}]). Give a kind, a label, or both (both = nodes of that kind
+    that also carry that label).
+
+    Scope: omit `ontologies` for a single graph; pass `ontologies=[...]` to search
+    across many at once (multithreaded fan-out). Replaces the old by-kind/by-label
+    and federated variants.
+    """
+    if kind is None and label is None:
+        raise ValueError("kg_find needs a kind and/or a label")
+    if ontologies:
+        fed = _federation(ontologies)
+        located = fed.nodes_by_kind(kind) if kind is not None else fed.nodes_by_label(label)
+        if kind is not None and label is not None:
+            located = [l for l in located if label in l.node.labels]
+        return [_located_to_dict(l) for l in located]
+    b = _bundle(ontology)
+    nodes = b.backend.nodes_by_kind(kind) if kind is not None else b.backend.nodes_by_label(label)
+    if kind is not None and label is not None:
+        nodes = [n for n in nodes if label in n.labels]
+    return [{"ontology": b.entry.name, "node": _node_to_dict(n)} for n in nodes]
 
 
 @mcp.tool()
-def kg_nodes_by_label(label: str, ontology: str | None = None) -> list[dict]:
-    """List all nodes carrying a label."""
-    return [_node_to_dict(n) for n in _bundle(ontology).backend.nodes_by_label(label)]
-
-
-@mcp.tool()
-def kg_edges_out(id: str, edge_type: str | None = None, ontology: str | None = None) -> list[dict]:
-    """Outbound edges from a node, optionally filtered by edge type."""
-    out = []
-    for edge, target in _bundle(ontology).backend.out(id, edge_type):
-        d = _edge_to_dict(edge)
-        d["target"] = _node_to_dict(target)
-        out.append(d)
-    return out
-
-
-@mcp.tool()
-def kg_edges_in(id: str, edge_type: str | None = None, ontology: str | None = None) -> list[dict]:
-    """Inbound edges into a node, optionally filtered by edge type."""
-    out = []
-    for edge, source in _bundle(ontology).backend.in_(id, edge_type):
-        d = _edge_to_dict(edge)
-        d["source"] = _node_to_dict(source)
-        out.append(d)
+def kg_edges(
+    id: str, direction: str = "out", edge_type: str | None = None, ontology: str | None = None
+) -> list[dict]:
+    """Edges of a node, optionally filtered by `edge_type`. `direction` is "out"
+    (default), "in", or "both". Each result is the edge plus the node on the other
+    end: {direction, id, from, to, type, properties, node}."""
+    b = _bundle(ontology).backend
+    out: list[dict] = []
+    if direction in ("out", "both"):
+        for edge, target in b.out(id, edge_type):
+            d = _edge_to_dict(edge)
+            d["direction"], d["node"] = "out", _node_to_dict(target)
+            out.append(d)
+    if direction in ("in", "both"):
+        for edge, source in b.in_(id, edge_type):
+            d = _edge_to_dict(edge)
+            d["direction"], d["node"] = "in", _node_to_dict(source)
+            out.append(d)
     return out
 
 
@@ -305,7 +349,9 @@ def kg_node_upsert(
     actor: str = "anonymous",
     ontology: str | None = None,
 ) -> dict:
-    """Create or update a node. Properties are JSON-serializable.
+    """Create or update a node — also the way to add labels or set properties
+    (pass `labels=[...]` / `properties={...}`; both merge into the existing node).
+    Properties are JSON-serializable.
 
     Gated by invariants then policy. Logged as a reversible NODE_UPSERT event
     (the node's prior state is captured so the upsert can be compensated).
@@ -315,22 +361,6 @@ def kg_node_upsert(
         b.backend, b.events, id=id, kind=kind, name=name, labels=labels, properties=properties, actor=actor
     )
     return _node_to_dict(node)  # type: ignore[return-value]
-
-
-@mcp.tool()
-def kg_node_set_label(id: str, label: str, actor: str = "anonymous", ontology: str | None = None) -> dict | None:
-    """Add a label to an existing node. Logged + reversible."""
-    b = _bundle(ontology)
-    return _node_to_dict(service.set_label(b.backend, b.events, id, label, actor=actor))
-
-
-@mcp.tool()
-def kg_node_set_property(
-    id: str, key: str, value: Any, actor: str = "anonymous", ontology: str | None = None
-) -> dict | None:
-    """Set a single property on a node. Value must be JSON-serializable. Logged + reversible."""
-    b = _bundle(ontology)
-    return _node_to_dict(service.set_property(b.backend, b.events, id, key, value, actor=actor))
 
 
 @mcp.tool()
@@ -449,6 +479,70 @@ def kg_rdf_import(
     ctx = rdf.IriContext(edge_strategy=edge_strategy)
     res = rdf.import_rdf(b.backend, b.events, text, fmt=format, ctx=ctx, actor=actor)
     return {"ontology": b.entry.name, **res}
+
+
+# =====================================================================
+# CROSS-ONTOLOGY — the backbone (links + identity + the prefix registry)
+# =====================================================================
+#
+# Federated *reads* fold into the read tools above via their `ontologies=[...]`
+# parameter (kg_schema, kg_find, kg_node_get) — there is no separate federated
+# tool family. What remains here is the cross-ontology *write* surface and the
+# reads unique to it: a leaf edge can't cross files, so cross-ontology links live
+# in the index graph as Ref proxy nodes joined by edges, written through the same
+# gated + logged path. The prefix registry is the lightweight identity backbone.
+
+
+@mcp.tool()
+def kg_link(
+    from_ontology: str,
+    from_id: str,
+    type: str,
+    to_ontology: str,
+    to_id: str,
+    properties: dict[str, Any] | None = None,
+    symmetric: bool = False,
+    actor: str = "backbone",
+) -> dict:
+    """Assert a typed relationship between nodes in two DIFFERENT ontologies
+    (impossible as a normal edge — those can't cross files). For "same real-world
+    entity", use type="SAME_AS" with symmetric=True (read the cluster back with
+    kg_identity). symmetric=True also writes the reverse. Gated + logged."""
+    return backbone.link(from_ontology, from_id, type, to_ontology, to_id,
+                         properties=properties, symmetric=symmetric, actor=actor)
+
+
+@mcp.tool()
+def kg_links_of(ontology: str, id: str, type: str | None = None) -> list[dict]:
+    """Every cross-ontology link touching a node (both directions)."""
+    return [
+        {"direction": l.direction, "type": l.type, "ontology": l.other_ontology,
+         "id": l.other_id, "properties": l.properties}
+        for l in backbone.links_of(ontology, id, type=type)
+    ]
+
+
+@mcp.tool()
+def kg_identity(ontology: str, id: str) -> list[dict]:
+    """The materialized SAME_AS cluster of a node — every leaf node explicitly
+    asserted (transitively) to be the same real-world entity, fetched live and
+    tagged by ontology ([{ontology, node}]). Pairs with kg_link(type=SAME_AS)."""
+    return [_located_to_dict(l) for l in Federation.all().identity(ontology, id)]
+
+
+@mcp.tool()
+def kg_prefix_add(prefix: str, iri_base: str, actor: str = "backbone") -> dict:
+    """Bind a CURIE prefix to an IRI base (e.g. person -> https://kg.local/person/)."""
+    return backbone.register_prefix(prefix, iri_base, actor=actor)
+
+
+@mcp.tool()
+def kg_prefix_resolve(curie: str | None = None) -> dict:
+    """Resolve the prefix/IRI registry. With `curie`, expand it to its full IRI
+    ({curie, iri}); without, return every prefix -> IRI-base binding."""
+    if curie is None:
+        return backbone.prefixes()
+    return {"curie": curie, "iri": backbone.expand(curie)}
 
 
 # ---- event log: read + reversal + replay ----------------------------

@@ -12,9 +12,10 @@ A small, dependency-free knowledge-graph core:
 
 from __future__ import annotations
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 from kgrdbms.graph import Edge, Graph, Node, default_graph_path, slug
+from kgrdbms.federation import Federation, FederatedNode, Located
 from kgrdbms.events import (
     EventLog,
     GraphEvent,
@@ -34,6 +35,10 @@ __all__ = [
     "Edge",
     "slug",
     "default_graph_path",
+    # federation (cross-ontology reads) + backbone module (cross-ontology links)
+    "Federation",
+    "FederatedNode",
+    "Located",
     # events
     "EventLog",
     "GraphEvent",

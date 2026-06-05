@@ -69,6 +69,12 @@ class OntologyEntry:
     stance: str = "literal"                      # extraction opinion: literal | inferential | ...
     id_convention: str = "kind:slug"             # how the composer mints node ids
     allowed_kinds: list[str] = field(default_factory=list)  # empty = open / unconstrained
+    shared_identity: bool = False                # identity stance: do same-CURIE nodes in
+    #                                              this ontology denote the same entity as in
+    #                                              *other* shared_identity ontologies? Default
+    #                                              False = local identity (link explicitly via
+    #                                              the backbone). True = global: federation
+    #                                              merges same-id nodes across such ontologies.
 
     @classmethod
     def from_node(cls, node: Node) -> "OntologyEntry":
@@ -81,6 +87,7 @@ class OntologyEntry:
             stance=p.get("stance", "literal"),
             id_convention=p.get("id_convention", "kind:slug"),
             allowed_kinds=list(p.get("allowed_kinds", [])),
+            shared_identity=bool(p.get("shared_identity", False)),
         )
 
     def to_properties(self) -> dict[str, Any]:
@@ -165,6 +172,7 @@ def register(
     stance: str = "literal",
     id_convention: str = "kind:slug",
     allowed_kinds: list[str] | None = None,
+    shared_identity: bool = False,
 ) -> OntologyEntry:
     """Add (or update) an ontology in the index. Writes go direct — the registry
     is control-plane bookkeeping, not gated user data."""
@@ -181,6 +189,7 @@ def register(
         stance=stance,
         id_convention=id_convention,
         allowed_kinds=allowed_kinds or [],
+        shared_identity=shared_identity,
     )
     idx = _open_index(root)
     try:
@@ -194,6 +203,45 @@ def register(
     finally:
         idx.close()
     return entry
+
+
+def unregister(name: str, *, root: str | Path | None = None, purge: bool = False) -> dict:
+    """Remove an ontology from the index (the symmetric inverse of `register`).
+
+    By default this only *deregisters* — the entry is deleted from the index but
+    the ontology's data file is left on disk, so the ontology can be re-registered
+    and reopened intact. `purge=True` additionally deletes the on-disk SQLite file
+    (and its WAL/SHM sidecars) and the ontology's managed directory — destructive
+    and irreversible, so it's a separate, explicit opt-in.
+
+    Postgres/other engines: the registry entry and the control-plane log sidecar
+    are removed; the external database itself is never dropped from here.
+    Returns {name, deregistered, purged}.
+    """
+    entry = get_entry(name, root)
+    if entry is None:
+        return {"name": name, "deregistered": False, "purged": False}
+    idx = _open_index(root)
+    try:
+        idx.delete_node(f"ontology:{slug(name)}")
+    finally:
+        idx.close()
+    purged = False
+    if purge:
+        import shutil
+
+        managed_dir = ontologies_root(root) / "ontologies" / slug(name)
+        if managed_dir.exists():
+            shutil.rmtree(managed_dir, ignore_errors=True)
+            purged = True
+        if entry.backend == "sqlite":
+            base = Path(entry.path)
+            for suffix in ("", "-wal", "-shm"):
+                f = Path(str(base) + suffix)
+                if f.exists():
+                    f.unlink()
+                    purged = True
+    return {"name": name, "deregistered": True, "purged": purged}
 
 
 # ---- backend routing: the control-plane switch -----------------------

@@ -25,8 +25,9 @@ import sqlite3
 import sys
 from typing import Any
 
-from kgrdbms import __version__, rdf, resolver, service
+from kgrdbms import __version__, backbone, rdf, resolver, service
 from kgrdbms.events import EventLog
+from kgrdbms.federation import Federation, FederatedNode, Located
 from kgrdbms.graph import Edge, Graph, Node
 from kgrdbms.invariants import InvariantViolation
 
@@ -210,12 +211,160 @@ def cmd_schema(app: App, args) -> int:
     return 0
 
 
+# ---- federation: cross-ontology reads (multithreaded fan-out) --------
+
+
+def _located_dict(l: Located) -> dict:
+    return {"ontology": l.ontology, "node": _node_dict(l.node)}
+
+
+def _federation(args) -> Federation:
+    """Build a Federation from --ontologies (comma list) or all registered ones.
+    Federation operates over the registry root (KGRDBMS_HOME), not --db/--ontology."""
+    parallel = not getattr(args, "sequential", False)
+    raw = getattr(args, "ontologies", None)
+    if raw:
+        names = [s.strip() for s in raw.split(",") if s.strip()]
+        return Federation(names, parallel=parallel)
+    return Federation.all(parallel=parallel)
+
+
+def cmd_fed_schema(app: App, args) -> int:
+    s = _federation(args).schema(samples=args.samples)
+    m = s["merged"]
+    lines = [f"federation: {', '.join(s['ontologies'])}",
+             f"nodes: {m['nodes_total']:,}   edges: {m['edges_total']:,}",
+             "kinds: " + (", ".join(f"{k}×{c}" for k, c in m["kinds"].items()) or "(none)"),
+             "edge types: " + (", ".join(f"{t}×{c}" for t, c in m["edge_types"].items()) or "(none)"),
+             "labels: " + (", ".join(f"{l}×{c}" for l, c in m["labels"].items()) or "(none)")]
+    app.emit(s, "\n".join(lines))
+    return 0
+
+
+def cmd_fed_stats(app: App, args) -> int:
+    s = _federation(args).stats()
+    app.emit(s, f"federation: {', '.join(s['ontologies'])}\n"
+                f"nodes: {s['nodes_total']:,}   edges: {s['edges_total']:,}")
+    return 0
+
+
+def cmd_fed_nodes_by_kind(app: App, args) -> int:
+    located = _federation(args).nodes_by_kind(args.kind)
+    app.emit([_located_dict(l) for l in located],
+             "\n".join(f"[{l.ontology}] {_fmt_node(l.node)}" for l in located) or "(none)")
+    return 0
+
+
+def cmd_fed_nodes_by_label(app: App, args) -> int:
+    located = _federation(args).nodes_by_label(args.label)
+    app.emit([_located_dict(l) for l in located],
+             "\n".join(f"[{l.ontology}] {_fmt_node(l.node)}" for l in located) or "(none)")
+    return 0
+
+
+def cmd_fed_node(app: App, args) -> int:
+    fn: FederatedNode = _federation(args).node(args.id)
+    payload = {
+        "id": fn.id,
+        "occurrences": [_located_dict(l) for l in fn.occurrences],
+        "shared": fn.shared,
+        "merged": _node_dict(fn.merged),
+    }
+    if not fn.occurrences:
+        print(f"no node {args.id!r} in any member", file=sys.stderr)
+        app.emit(payload, "(not found)")
+        return 1
+    human = [f"id {fn.id} — found in {', '.join(l.ontology for l in fn.occurrences)}"]
+    if fn.merged is not None:
+        human.append(f"merged identity ({', '.join(fn.shared)}): {_fmt_node(fn.merged)}")
+    else:
+        human += [f"[{l.ontology}] {_fmt_node(l.node)}" for l in fn.occurrences]
+    app.emit(payload, "\n".join(human))
+    return 0
+
+
+# ---- backbone: cross-ontology links + prefix registry ----------------
+
+
+def cmd_link_add(app: App, args) -> int:
+    res = backbone.link(args.from_ontology, args.from_id, args.type,
+                        args.to_ontology, args.to_id,
+                        properties=_parse_props(args.prop), symmetric=args.symmetric, actor=args.actor)
+    app.emit(res, f"{res['from']} -[{res['type']}]-> {res['to']}"
+                  + ("  (symmetric)" if res["symmetric"] else ""))
+    return 0
+
+
+def cmd_link_same_as(app: App, args) -> int:
+    res = backbone.same_as(args.from_ontology, args.from_id, args.to_ontology, args.to_id, actor=args.actor)
+    app.emit(res, f"{res['from']} <-[SAME_AS]-> {res['to']}")
+    return 0
+
+
+def cmd_link_of(app: App, args) -> int:
+    links = backbone.links_of(args.ontology, args.id, type=args.type)
+    rows = [{"direction": l.direction, "type": l.type, "ontology": l.other_ontology,
+             "id": l.other_id, "properties": l.properties} for l in links]
+    human = []
+    for l in links:
+        arrow = f"-[{l.type}]->" if l.direction == "out" else f"<-[{l.type}]-"
+        human.append(f"{arrow}  {l.other_ontology}::{l.other_id}")
+    app.emit(rows, "\n".join(human) or "(no links)")
+    return 0
+
+
+def cmd_link_cluster(app: App, args) -> int:
+    cluster = backbone.identity_cluster(args.ontology, args.id)
+    rows = [{"ontology": o, "id": i} for o, i in cluster]
+    app.emit(rows, "\n".join(f"{o}::{i}" for o, i in cluster))
+    return 0
+
+
+def cmd_link_rm(app: App, args) -> int:
+    res = backbone.unlink(args.from_ontology, args.from_id, args.type,
+                          args.to_ontology, args.to_id, symmetric=args.symmetric, actor=args.actor)
+    app.emit(res, f"removed {res['removed']} link(s)")
+    return 0 if res["removed"] else 1
+
+
+def cmd_prefix_add(app: App, args) -> int:
+    res = backbone.register_prefix(args.prefix, args.iri_base, actor=args.actor)
+    app.emit(res, f"{res['prefix']}: -> {res['iri_base']}")
+    return 0
+
+
+def cmd_prefix_list(app: App, args) -> int:
+    pfx = backbone.prefixes()
+    app.emit(pfx, "\n".join(f"{p:16} {b}" for p, b in pfx.items()) or "(no prefixes registered)")
+    return 0
+
+
+def cmd_prefix_expand(app: App, args) -> int:
+    iri = backbone.expand(args.curie)
+    if iri is None:
+        print(f"cannot expand {args.curie!r} (unknown prefix?)", file=sys.stderr)
+        app.emit(None, "")
+        return 1
+    app.emit({"curie": args.curie, "iri": iri}, iri)
+    return 0
+
+
+def cmd_prefix_contract(app: App, args) -> int:
+    curie = backbone.contract(args.iri)
+    if curie is None:
+        print(f"no registered prefix matches {args.iri!r}", file=sys.stderr)
+        app.emit(None, "")
+        return 1
+    app.emit({"iri": args.iri, "curie": curie}, curie)
+    return 0
+
+
 # ---- registry handlers (the control plane / db-of-dbs) ---------------
 
 
 def _ontology_dict(e) -> dict:
     return {"name": e.name, "backend": e.backend, "stance": e.stance,
-            "description": e.description, "path": e.path}
+            "description": e.description, "path": e.path, "shared_identity": e.shared_identity}
 
 
 def cmd_ontology_list(app: App, args) -> int:
@@ -230,12 +379,23 @@ def cmd_ontology_list(app: App, args) -> int:
 def cmd_ontology_create(app: App, args) -> int:
     entry = resolver.register(
         args.name, backend=args.backend, description=args.description or "", stance=args.stance,
-        path=args.location,
+        path=args.location, shared_identity=getattr(args, "shared_identity", False),
     )
     app.emit(
         _ontology_dict(entry),
         f"registered ontology {entry.name!r} (backend={entry.backend}, stance={entry.stance})\n{entry.path}",
     )
+    return 0
+
+
+def cmd_ontology_delete(app: App, args) -> int:
+    res = resolver.unregister(args.name, purge=args.purge)
+    if not res["deregistered"]:
+        print(f"no ontology {args.name!r}", file=sys.stderr)
+        app.emit(res, "")
+        return 1
+    note = " (data purged from disk)" if res["purged"] else " (data left on disk)"
+    app.emit(res, f"deregistered ontology {args.name!r}{note}")
     return 0
 
 
@@ -475,6 +635,90 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also show example node ids and enum-like property values per kind")
     sp.set_defaults(func=cmd_schema)
 
+    # ---- federation: cross-ontology reads (multithreaded fan-out) ----
+    fed = sub.add_parser("fed", help="query across many ontologies at once (fan-out)").add_subparsers(
+        dest="action", required=True)
+
+    def _fed_common(a):
+        a.add_argument("--ontologies", help="comma list of ontologies (default: all registered)")
+        a.add_argument("--sequential", action="store_true", help="disable the default multithreaded fan-out")
+
+    a = fed.add_parser("schema", help="union schema across the federation")
+    a.add_argument("--samples", action="store_true")
+    _fed_common(a)
+    a.set_defaults(func=cmd_fed_schema)
+    a = fed.add_parser("stats", help="node/edge totals across the federation")
+    _fed_common(a)
+    a.set_defaults(func=cmd_fed_stats)
+    a = fed.add_parser("nodes-by-kind", help="nodes of a kind across all ontologies (tagged by source)")
+    a.add_argument("kind")
+    _fed_common(a)
+    a.set_defaults(func=cmd_fed_nodes_by_kind)
+    a = fed.add_parser("nodes-by-label", help="nodes carrying a label across all ontologies")
+    a.add_argument("label")
+    _fed_common(a)
+    a.set_defaults(func=cmd_fed_nodes_by_label)
+    a = fed.add_parser("node", help="find an id across the federation (identity-aware)")
+    a.add_argument("id")
+    _fed_common(a)
+    a.set_defaults(func=cmd_fed_node)
+
+    # ---- backbone: cross-ontology links ----
+    link = sub.add_parser("link", help="cross-ontology links (the backbone)").add_subparsers(
+        dest="action", required=True)
+    a = link.add_parser("add", help="link a node in one ontology to a node in another")
+    a.add_argument("from_ontology", metavar="FROM_ONT")
+    a.add_argument("from_id", metavar="FROM_ID")
+    a.add_argument("type")
+    a.add_argument("to_ontology", metavar="TO_ONT")
+    a.add_argument("to_id", metavar="TO_ID")
+    a.add_argument("--prop", action="append", metavar="KEY=VALUE")
+    a.add_argument("--symmetric", action="store_true", help="also write the reverse edge")
+    a.add_argument("--actor", default="cli")
+    a.set_defaults(func=cmd_link_add)
+    a = link.add_parser("same-as", help="assert two nodes are the same entity (symmetric)")
+    a.add_argument("from_ontology", metavar="FROM_ONT")
+    a.add_argument("from_id", metavar="FROM_ID")
+    a.add_argument("to_ontology", metavar="TO_ONT")
+    a.add_argument("to_id", metavar="TO_ID")
+    a.add_argument("--actor", default="cli")
+    a.set_defaults(func=cmd_link_same_as)
+    a = link.add_parser("of", help="all cross-ontology links touching a node")
+    a.add_argument("ontology")
+    a.add_argument("id")
+    a.add_argument("--type", help="filter by link type")
+    a.set_defaults(func=cmd_link_of)
+    a = link.add_parser("cluster", help="the transitive SAME_AS identity cluster of a node")
+    a.add_argument("ontology")
+    a.add_argument("id")
+    a.set_defaults(func=cmd_link_cluster)
+    a = link.add_parser("rm", help="remove a cross-ontology link")
+    a.add_argument("from_ontology", metavar="FROM_ONT")
+    a.add_argument("from_id", metavar="FROM_ID")
+    a.add_argument("type")
+    a.add_argument("to_ontology", metavar="TO_ONT")
+    a.add_argument("to_id", metavar="TO_ID")
+    a.add_argument("--symmetric", action="store_true")
+    a.add_argument("--actor", default="cli")
+    a.set_defaults(func=cmd_link_rm)
+
+    # ---- backbone: prefix / IRI registry ----
+    pfx = sub.add_parser("prefix", help="CURIE prefix -> IRI registry (identity backbone)").add_subparsers(
+        dest="action", required=True)
+    a = pfx.add_parser("add", help="bind a prefix to an IRI base")
+    a.add_argument("prefix")
+    a.add_argument("iri_base", metavar="IRI_BASE")
+    a.add_argument("--actor", default="cli")
+    a.set_defaults(func=cmd_prefix_add)
+    a = pfx.add_parser("list", help="all registered prefixes")
+    a.set_defaults(func=cmd_prefix_list)
+    a = pfx.add_parser("expand", help="CURIE -> IRI")
+    a.add_argument("curie")
+    a.set_defaults(func=cmd_prefix_expand)
+    a = pfx.add_parser("contract", help="IRI -> CURIE")
+    a.add_argument("iri")
+    a.set_defaults(func=cmd_prefix_contract)
+
     # ---- ontology registry (the db-of-dbs) ----
     ont = sub.add_parser("ontology", help="manage the ontology registry").add_subparsers(dest="action", required=True)
     a = ont.add_parser("list", help="list registered ontologies")
@@ -486,7 +730,15 @@ def build_parser() -> argparse.ArgumentParser:
                                       "omit for a managed sqlite file")
     a.add_argument("--description", default="")
     a.add_argument("--stance", default="literal", help="extraction opinion: literal | inferential | ...")
+    a.add_argument("--shared-identity", dest="shared_identity", action="store_true",
+                   help="same-CURIE nodes here denote the same entity as in other shared-identity "
+                        "ontologies (federation merges them); default is local identity")
     a.set_defaults(func=cmd_ontology_create)
+    a = ont.add_parser("delete", help="remove an ontology from the registry (--purge also deletes its data)")
+    a.add_argument("name")
+    a.add_argument("--purge", action="store_true",
+                   help="also delete the on-disk data file (destructive, irreversible)")
+    a.set_defaults(func=cmd_ontology_delete)
 
     # ---- node group ----
     node = sub.add_parser("node", help="node operations").add_subparsers(dest="action", required=True)

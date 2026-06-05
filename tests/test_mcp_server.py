@@ -28,11 +28,11 @@ def mcp_mod(tmp_path, monkeypatch):
 # ---- reads -----------------------------------------------------------
 
 
-def test_stats_on_empty_graph(mcp_mod):
-    stats = mcp_mod.kg_stats()
-    assert stats["nodes_total"] == 0
-    assert stats["edges_total"] == 0
-    assert stats["db_path"].endswith("graph.db")
+def test_schema_on_empty_graph(mcp_mod):
+    s = mcp_mod.kg_schema()
+    assert s["nodes_total"] == 0
+    assert s["edges_total"] == 0
+    assert s["kinds"] == {}
 
 
 def test_node_get_missing_returns_none(mcp_mod):
@@ -53,13 +53,53 @@ def test_upsert_then_get(mcp_mod):
     assert n["properties"]["weight"] == 0.42
 
 
-def test_nodes_by_kind_and_label(mcp_mod):
+def test_find_by_kind_and_label(mcp_mod):
     mcp_mod.kg_node_upsert(id="a:1", kind="A", name="1", labels=["Tagged"])
     mcp_mod.kg_node_upsert(id="a:2", kind="A", name="2")
     mcp_mod.kg_node_upsert(id="b:1", kind="B", name="1", labels=["Tagged"])
-    assert len(mcp_mod.kg_nodes_by_kind("A")) == 2
-    tagged = {n["id"] for n in mcp_mod.kg_nodes_by_label("Tagged")}
+    assert len(mcp_mod.kg_find(kind="A")) == 2
+    tagged = {r["node"]["id"] for r in mcp_mod.kg_find(label="Tagged")}
     assert tagged == {"a:1", "b:1"}
+    # both filters = intersection (kind A AND label Tagged)
+    both = mcp_mod.kg_find(kind="A", label="Tagged")
+    assert {r["node"]["id"] for r in both} == {"a:1"}
+
+
+def test_ontology_delete_tool(mcp_mod):
+    mcp_mod.kg_ontology_create(name="coffee")
+    mcp_mod.kg_node_upsert(id="drink:latte", kind="Drink", name="Latte", ontology="coffee")
+    assert any(o["name"] == "coffee" for o in mcp_mod.kg_ontologies_list())
+    res = mcp_mod.kg_ontology_delete("coffee")
+    assert res["deregistered"] is True
+    assert all(o["name"] != "coffee" for o in mcp_mod.kg_ontologies_list())
+    assert mcp_mod.kg_ontology_delete("ghost")["deregistered"] is False
+
+
+def test_cross_ontology_tools(mcp_mod):
+    # two ontologies, one node each, queried and linked across the boundary
+    mcp_mod.kg_node_upsert(id="drink:latte", kind="Drink", name="Latte", ontology="coffee")
+    mcp_mod.kg_node_upsert(id="person:ada", kind="Person", name="Ada", ontology="people")
+
+    # federation folds into the base reads via ontologies=[...]
+    sch = mcp_mod.kg_schema(ontologies=["coffee", "people"])
+    assert sch["merged"]["kinds"].get("Drink") == 1 and sch["merged"]["kinds"].get("Person") == 1
+    found = mcp_mod.kg_find(kind="Person", ontologies=["coffee", "people"])
+    assert any(r["ontology"] == "people" and r["node"]["id"] == "person:ada" for r in found)
+
+    mcp_mod.kg_link("coffee", "drink:latte", "ENJOYED_BY", "people", "person:ada",
+                    properties={"since": 2020})
+    links = mcp_mod.kg_links_of("coffee", "drink:latte")
+    assert links[0]["type"] == "ENJOYED_BY" and links[0]["ontology"] == "people"
+
+    # SAME_AS via kg_link(type=SAME_AS, symmetric=True), read back with kg_identity
+    mcp_mod.kg_link("coffee", "drink:latte", "SAME_AS", "people", "person:ada", symmetric=True)
+    cluster = mcp_mod.kg_identity("coffee", "drink:latte")
+    assert {(r["ontology"], r["node"]["id"]) for r in cluster} == {
+        ("coffee", "drink:latte"), ("people", "person:ada")}
+
+    mcp_mod.kg_prefix_add("person", "https://kg.local/person/")
+    assert mcp_mod.kg_prefix_resolve("person:ada")["iri"] == "https://kg.local/person/ada"
+    assert "person" in mcp_mod.kg_prefix_resolve()
 
 
 def test_schema_exposes_vocabulary(mcp_mod):
@@ -80,8 +120,8 @@ def test_edges_out_and_shortest_path(mcp_mod):
         mcp_mod.kg_node_upsert(id=nid, kind="X", name=nid)
     mcp_mod.kg_edge_add(from_id="x:1", to_id="x:2", type="REL")
     mcp_mod.kg_edge_add(from_id="x:2", to_id="x:3", type="REL")
-    out = mcp_mod.kg_edges_out("x:1", edge_type="REL")
-    assert out[0]["target"]["id"] == "x:2"
+    out = mcp_mod.kg_edges("x:1", direction="out", edge_type="REL")
+    assert out[0]["direction"] == "out" and out[0]["node"]["id"] == "x:2"
     path = mcp_mod.kg_shortest_path("x:1", "x:3")
     assert [n["id"] for n in path] == ["x:1", "x:2", "x:3"]
 
@@ -119,7 +159,7 @@ def test_import_is_idempotent_and_gated(mcp_mod, monkeypatch):
     doc = {"nodes": [{"id": "a:1", "kind": "T", "name": "1"}], "edges": []}
     mcp_mod.kg_import(**doc)
     mcp_mod.kg_import(**doc)  # re-import merges, not duplicates
-    assert len(mcp_mod.kg_nodes_by_kind("T")) == 1
+    assert len(mcp_mod.kg_find(kind="T")) == 1
     # a denying policy aborts the whole import (atomic) and raises
     from kgrdbms.policy import Decision
     monkeypatch.setattr("kgrdbms.policy.mutation_check", lambda ctx: Decision.deny("sealed"))
@@ -144,7 +184,7 @@ def test_node_delete_cascades_edges(mcp_mod):
     mcp_mod.kg_node_upsert(id="t:b", kind="T", name="b")
     mcp_mod.kg_edge_add(from_id="t:a", to_id="t:b", type="REL")
     mcp_mod.kg_node_delete("t:a")
-    assert mcp_mod.kg_edges_in("t:b", edge_type="REL") == []
+    assert mcp_mod.kg_edges("t:b", direction="in", edge_type="REL") == []
 
 
 # ---- gate ------------------------------------------------------------
