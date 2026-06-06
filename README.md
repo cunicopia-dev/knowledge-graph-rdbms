@@ -6,7 +6,7 @@
 ![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
 ![tests: 107 passing](https://img.shields.io/badge/tests-107_passing-brightgreen)
 ![storage: SQLite + Postgres](https://img.shields.io/badge/storage-SQLite_%2B_Postgres-003B57?logo=sqlite&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-25_tools-FF6F00)
+![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
 **A knowledge graph for modeling _meaning_ — entities, the kinds of things they
 are, and the relationships between them — in a single SQLite file.**
@@ -333,9 +333,8 @@ NAME` routes through the resolver (named, registered, multi-engine), while
 ## Discovery: read the schema before you query
 
 A graph you didn't build is opaque: which `kind`s exist? which edge types? what
-property keys live on a `Person`? Guessing burns turns — and for an LLM it's
-worse, since it otherwise probes with empty queries until it stumbles onto the
-vocabulary. `schema()` answers all of it in **one read**.
+property keys live on a `Person`? `schema()` answers all of it in **one read** —
+the map to read before querying, rather than guessing with trial calls.
 
 ```bash
 kg schema             # kinds, edge types, labels, and property keys per kind — with counts
@@ -354,8 +353,7 @@ many ontologies at once.
 ## Cross-ontology: federation and the backbone
 
 The control plane routes to *one* ontology per call. Two layers sit on top to work
-across *many* at once — and the split is deliberate: **reads federate, writes go
-through a backbone.**
+across *many* at once: **reads federate, writes go through a backbone.**
 
 ```mermaid
 flowchart TD
@@ -413,11 +411,10 @@ kg prefix add person https://kg.local/person/                 # CURIE prefix -> 
 ```
 
 **Identity is opt-in per ontology.** By default identity is *local* — `person:ada`
-in two ontologies are different nodes until you link them. An ontology created with
-`--shared-identity` opts into *global* identity, and federation then treats
-same-CURIE nodes across such ontologies as the **same** entity and merges them. It's
-the lightweight LPG answer to RDF's global-IRI identity: stay local by default, adopt
-shared identity surgically.
+in two ontologies are different nodes until you link them via the backbone. An
+ontology created with `--shared-identity` opts into *global* identity, and federation
+then treats same-CURIE nodes across such ontologies as the **same** entity and merges
+them.
 
 ---
 
@@ -635,11 +632,11 @@ Or hand-edit a client config (e.g. Claude Desktop):
 { "mcpServers": { "kgrdbms": { "command": "kgrdbms-mcp" } } }
 ```
 
-It exposes **25** `kg_`-prefixed tools over one engine. Reads — `kg_schema` (the
+It exposes `kg_`-prefixed tools over one engine. Reads — `kg_schema` (the
 vocabulary, meant to be called first), `kg_node_get`, `kg_find` (by kind and/or
 label), `kg_edges`, `kg_neighborhood`, `kg_shortest_path`, `kg_descendants` — each
-take an optional `ontologies=[...]` to **fan out across many ontologies in one
-call**. Then gated writes (`kg_node_upsert`, `kg_edge_add`, `kg_edge_remove`,
+take an optional `ontologies=[...]` to fan out across many ontologies in one
+call. Then gated writes (`kg_node_upsert`, `kg_edge_add`, `kg_edge_remove`,
 `kg_node_delete`), bulk composition (`kg_import` — a whole `{nodes, edges}` batch in
 one call, so an agent populates an ontology in a single tool call instead of dozens),
 the cross-ontology backbone (`kg_link`, `kg_links_of`, `kg_identity`, `kg_prefix_add`,
@@ -649,12 +646,6 @@ the invariants + policy gate and is recorded — same engine, same file as the C
 Every tool takes an optional `ontology` name, and `kg_ontologies_list` /
 `kg_ontology_create` / `kg_ontology_delete` manage the registry — so an agent can
 discover, create, route between, and delete ontologies entirely over MCP.
-
-> The surface is deliberately small — **25 outcome-oriented tools, not one per
-> internal method** — because a model's tool-selection accuracy degrades when it
-> faces dozens of near-duplicate options. Federation is modeled as a *scope*
-> (`ontologies=`), not a parallel tool family, which keeps "find Person nodes" a
-> single intent whether it hits one ontology or ten.
 
 ---
 
