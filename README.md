@@ -1,11 +1,12 @@
 # knowledge-graph-rdbms
 
+![PyPI](https://img.shields.io/pypi/v/knowledge-graph-rdbms?logo=pypi&logoColor=white&color=3775A9)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
-![tests: 87 passing](https://img.shields.io/badge/tests-87_passing-brightgreen)
-![storage: SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
+![tests: 107 passing](https://img.shields.io/badge/tests-107_passing-brightgreen)
+![storage: SQLite + Postgres](https://img.shields.io/badge/storage-SQLite_%2B_Postgres-003B57?logo=sqlite&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-25_tools-FF6F00)
 
 **A knowledge graph for modeling _meaning_ — entities, the kinds of things they
 are, and the relationships between them — in a single SQLite file.**
@@ -46,6 +47,8 @@ Small enough to hold in your head. Flexible enough to model anything.
 - [The data model](#the-data-model)
 - [Architecture: three front doors, one engine](#architecture-three-front-doors-one-engine)
 - [Many ontologies: one control plane](#many-ontologies-one-control-plane)
+- [Discovery: read the schema before you query](#discovery-read-the-schema-before-you-query)
+- [Cross-ontology: federation and the backbone](#cross-ontology-federation-and-the-backbone)
 - [Event sourcing: the graph is a projection](#event-sourcing-the-graph-is-a-projection)
 - [The safety gate: invariants vs. policy](#the-safety-gate-invariants-vs-policy)
 - [Install](#install)
@@ -327,6 +330,97 @@ NAME` routes through the resolver (named, registered, multi-engine), while
 
 ---
 
+## Discovery: read the schema before you query
+
+A graph you didn't build is opaque: which `kind`s exist? which edge types? what
+property keys live on a `Person`? Guessing burns turns — and for an LLM it's
+worse, since it otherwise probes with empty queries until it stumbles onto the
+vocabulary. `schema()` answers all of it in **one read**.
+
+```bash
+kg schema             # kinds, edge types, labels, and property keys per kind — with counts
+kg schema --samples   # + a few example ids per kind and the enum-like values a key takes
+```
+
+What comes back is the *observed* vocabulary — a profile of what's actually in
+the graph, not an enforced schema (the graph stays schemaless). The MCP tool
+`kg_schema` carries an instruction to call it **first**, so an agent reads the map
+before it moves. It's a plain read — pure `GROUP BY` aggregates, no gate — and
+like every read it has a federated form (next) that unions the vocabulary across
+many ontologies at once.
+
+---
+
+## Cross-ontology: federation and the backbone
+
+The control plane routes to *one* ontology per call. Two layers sit on top to work
+across *many* at once — and the split is deliberate: **reads federate, writes go
+through a backbone.**
+
+```mermaid
+flowchart TD
+    Q["kg fed node person:ada"] --> FED["federation.py<br/>multithreaded fan-out"]
+    FED -.->|own thread + connection| O1[("people")]
+    FED -.->|own thread + connection| O2[("papers")]
+    FED -.->|own thread + connection| O3[("coffee")]
+    O1 --> M["merge, tagged by source<br/>(identity-aware)"]
+    O2 --> M
+    O3 --> M
+
+    L["kg link same-as …"] --> BB["backbone.py"]
+    BB --> IDX[["index.db — the backbone<br/>Ref + Prefix nodes, SAME_AS edges<br/>gated + logged"]]
+```
+
+### Federation — cross-ontology reads, multithreaded
+
+A federated read is a *fan-out*: open each member ontology in its own thread (its
+own connection — SQLite releases the GIL during a query, so N ontologies read
+**concurrently**) and merge the results tagged by source. There's no separate
+"federated" API: every base read takes an optional `ontologies=[...]` scope.
+
+```python
+from kgrdbms import Federation
+
+fed = Federation(["people", "papers", "coffee"])   # or Federation.all()
+fed.schema()                 # unioned vocabulary + a per-ontology breakdown
+fed.nodes_by_kind("Person")  # [Located(ontology, node), ...] — tagged by source
+fed.node("person:ada")       # every occurrence across worlds, identity-merged
+```
+
+```bash
+kg fed schema                # union vocabulary across ALL ontologies
+kg fed node person:ada       # find an id across the federation (identity-aware)
+```
+
+Federation never writes and never silently drops a member (a member that raises
+propagates); `parallel=False` forces sequential for debugging.
+
+### The backbone — cross-ontology links
+
+A leaf edge can't cross ontologies: its foreign key lives in one file. The backbone
+is where cross-ontology structure lives, and it needs **no new storage — it *is* the
+index graph** growing new kinds. A link becomes a lightweight `Ref` proxy node per
+endpoint (id `<ontology>::<node_id>`, FK-satisfied *inside* the index) joined by an
+edge; the prefix registry becomes `Prefix` nodes. Both go through the **same gated +
+logged `service` path**, so a cross-domain assertion is audited, reversible, and
+replayable exactly like leaf data.
+
+```bash
+kg link add coffee drink:latte ENJOYED_BY people person:ada   # a typed cross-ontology edge
+kg link same-as people person:ada wiki person:ada-lovelace    # "same real-world entity" (symmetric)
+kg link cluster people person:ada                             # the transitive SAME_AS cluster
+kg prefix add person https://kg.local/person/                 # CURIE prefix -> IRI (identity backbone)
+```
+
+**Identity is opt-in per ontology.** By default identity is *local* — `person:ada`
+in two ontologies are different nodes until you link them. An ontology created with
+`--shared-identity` opts into *global* identity, and federation then treats
+same-CURIE nodes across such ontologies as the **same** entity and merges them. It's
+the lightweight LPG answer to RDF's global-IRI identity: stay local by default, adopt
+shared identity surgically.
+
+---
+
 ## Event sourcing: the graph is a projection
 
 The graph you query is a cache. The **append-only event log is the source of
@@ -541,18 +635,26 @@ Or hand-edit a client config (e.g. Claude Desktop):
 { "mcpServers": { "kgrdbms": { "command": "kgrdbms-mcp" } } }
 ```
 
-It exposes `kg_`-prefixed tools for reads (`kg_schema` — the vocabulary, meant to
-be called first; `kg_node_get`, `kg_nodes_by_kind`,
-`kg_neighborhood`, `kg_shortest_path`, `kg_descendants`, …), gated writes
-(`kg_node_upsert`, `kg_edge_add`, `kg_node_delete`, …), bulk composition
-(`kg_import` — a whole `{nodes, edges}` batch in one call, so an agent populates
-an ontology in a single tool call instead of dozens), RDF interop
-(`kg_rdf_export`, `kg_rdf_import` — see below), and the event log
-(`kg_events_tail`, `kg_event_revert`, `kg_replay`). Every write passes through
-the invariants + policy gate and is recorded — same engine, same file as the
-CLI. Every tool also takes an optional `ontology` name (omit for the default),
-and `kg_ontologies_list` / `kg_ontology_create` manage the registry — so an
-agent can discover, create, and route between ontologies entirely over MCP.
+It exposes **25** `kg_`-prefixed tools over one engine. Reads — `kg_schema` (the
+vocabulary, meant to be called first), `kg_node_get`, `kg_find` (by kind and/or
+label), `kg_edges`, `kg_neighborhood`, `kg_shortest_path`, `kg_descendants` — each
+take an optional `ontologies=[...]` to **fan out across many ontologies in one
+call**. Then gated writes (`kg_node_upsert`, `kg_edge_add`, `kg_edge_remove`,
+`kg_node_delete`), bulk composition (`kg_import` — a whole `{nodes, edges}` batch in
+one call, so an agent populates an ontology in a single tool call instead of dozens),
+the cross-ontology backbone (`kg_link`, `kg_links_of`, `kg_identity`, `kg_prefix_add`,
+`kg_prefix_resolve`), RDF interop (`kg_rdf_export`, `kg_rdf_import` — see below), and
+the event log (`kg_events_tail`, `kg_event_revert`, `kg_replay`). Every write passes
+the invariants + policy gate and is recorded — same engine, same file as the CLI.
+Every tool takes an optional `ontology` name, and `kg_ontologies_list` /
+`kg_ontology_create` / `kg_ontology_delete` manage the registry — so an agent can
+discover, create, route between, and delete ontologies entirely over MCP.
+
+> The surface is deliberately small — **25 outcome-oriented tools, not one per
+> internal method** — because a model's tool-selection accuracy degrades when it
+> faces dozens of near-duplicate options. Federation is modeled as a *scope*
+> (`ontologies=`), not a parallel tool family, which keeps "find Person nodes" a
+> single intent whether it hits one ontology or ten.
 
 ---
 
@@ -740,7 +842,8 @@ replayable.
 | `kg ontology create NAME …`     | register an ontology (`--backend`, `--stance`, `--shared-identity`) |
 | `kg ontology delete NAME [--purge]` | deregister an ontology (`--purge` also deletes its data) |
 | `kg fed schema [--samples]`     | union vocabulary across ALL ontologies (multithreaded fan-out) |
-| `kg fed nodes-by-kind KIND`     | nodes of a kind across ontologies, tagged by source |
+| `kg fed stats`                  | node/edge totals across the federation        |
+| `kg fed nodes-by-kind KIND` / `nodes-by-label LABEL` | nodes across ontologies, tagged by source |
 | `kg fed node ID`                | find an id across the federation (identity-aware) |
 | `kg link add FROM_ONT FROM TYPE TO_ONT TO` | cross-ontology edge (the backbone) |
 | `kg link same-as A FROM B TO`   | assert two nodes are the same entity (symmetric) |
@@ -766,6 +869,8 @@ kgrdbms/
 ├── invariants.py   # compiled-in invariants, checked before policy (no-op default)
 ├── service.py      # the shared gated + logged write path
 ├── resolver.py     # control plane: ontology name → (backend, events, entry) + the index
+├── federation.py   # cross-ontology reads: multithreaded fan-out, identity-aware merge
+├── backbone.py     # cross-ontology links + prefix/IRI registry (lives in the index graph)
 ├── backends/       # pluggable engine registry
 │   ├── base.py     #   GraphBackend protocol + raising stub skeleton
 │   ├── sqlite.py   #   live engine (adapter over Graph)
@@ -787,7 +892,7 @@ own. Everything else layers on top; `service.py` depends only on the
 ```bash
 git clone <repo> && cd knowledge-graph-rdbms
 uv venv && uv pip install -e ".[dev]"
-pytest                       # 62 tests
+pytest                       # 107 tests
 python bench/benchmark.py    # benchmark with p50–p99 (see bench/README.md)
 ```
 
