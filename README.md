@@ -394,6 +394,55 @@ replay(graph, events, genesis=genesis, upto_ts=ts)  # ...as of an instant
 
 ---
 
+## Virtual edges: relationships you don't store
+
+Event sourcing is the right model for *curated facts* — but the wrong one for a
+high-cardinality, machine-generated relationship layer that already lives, fresh
+and authoritative, in some operational store. Mirroring 100k correlation edges
+into the graph (and the log) every night is wasteful and instantly stale.
+
+A **virtual edge** inverts that. The ontology stores only a *binding* — an edge
+TYPE plus the SQL that resolves its instances against an external source. At
+traversal time the resolver runs that query, parameterized by the node you're
+standing on, and synthesizes the edges live. Zero copy, always current, one
+source of truth — Ontology-Based Data Access in the graph's own terms.
+
+```python
+# Bind CO_HELD_WITH to a query over the operational store (here, any DB-API source)
+kg_virtual_edge_add(
+    edge_type="CO_HELD_WITH",
+    query="SELECT b AS to_id, shared FROM co_held WHERE a = ?",  # '?' sqlite, '%s' postgres
+    dsn_env="OUROBOROS_DSN",          # credentials by reference — never in the graph
+    source="id_slug",                  # company:NVDA -> bind "NVDA"
+    target_id_template="company:{value}",
+    prop_cols=["shared"], directions="both", ontology="market",
+)
+
+# now ordinary traversal unions stored + virtual edges; virtual ones carry _virtual:true
+kg_edges("company:NVDA", direction="out", ontology="market")
+# -> [{to: "company:AMD", type: "CO_HELD_WITH", properties: {shared: 12, _virtual: true}, …}]
+```
+
+Two properties keep it safe and simple:
+
+- **Read-only.** Virtual edges are never written, so they sidestep the whole
+  gated-write / event-log / compensation machinery. A binding is config; the
+  edges are a view. Nothing to invalidate, replay, or undo.
+- **Parameterized, never interpolated.** The SQL template is operator-authored;
+  the per-node value is always *bound* through the driver, never formatted into
+  the string. Credentials ride `dsn_env` (an env-var name), so secrets stay out
+  of the graph and out of version control.
+
+Bindings live as reserved-kind (`_VirtualEdge`) nodes *in the ontology*, so they
+travel with it and version alongside the schema. This is the seam for a
+schema-graph / data-graph split: keep the curated **schema** (types, contracts,
+doctrine) in a portable SQLite ontology, and **virtualize the populated extension**
+straight out of your system-of-record — no ETL, no drift.
+
+Tools: `kg_virtual_edge_add`, `kg_virtual_edges_list`, `kg_virtual_edge_remove`.
+
+---
+
 ## The safety gate: invariants vs. policy
 
 When you expose the graph for live mutation — especially to an AI agent over

@@ -65,7 +65,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kgrdbms import backbone, rdf, resolver, service
+from kgrdbms import backbone, rdf, resolver, service, virtual
 from kgrdbms.federation import FederatedNode, Federation, Located
 from kgrdbms.graph import Edge, Node
 from kgrdbms.resolver import Resolved
@@ -290,7 +290,11 @@ def kg_edges(
 ) -> list[dict]:
     """Edges of a node, optionally filtered by `edge_type`. `direction` is "out"
     (default), "in", or "both". Each result is the edge plus the node on the other
-    end: {direction, id, from, to, type, properties, node}."""
+    end: {direction, id, from, to, type, properties, node}.
+
+    Stored edges and *virtual* edges (resolved live from an external SQL source —
+    see kg_virtual_edge_add) are unioned transparently; a virtual edge carries
+    `"_virtual": true` in its properties."""
     b = _bundle(ontology).backend
     out: list[dict] = []
     if direction in ("out", "both"):
@@ -303,7 +307,82 @@ def kg_edges(
             d = _edge_to_dict(edge)
             d["direction"], d["node"] = "in", _node_to_dict(source)
             out.append(d)
+    for d_dir, edge, far in virtual.augment(b, id, direction, edge_type):
+        d = _edge_to_dict(edge)
+        d["direction"], d["node"] = d_dir, _node_to_dict(far)
+        out.append(d)
     return out
+
+
+# =====================================================================
+# VIRTUAL EDGES — relationships resolved live from an external SQL source
+# =====================================================================
+
+
+@mcp.tool()
+def kg_virtual_edge_add(
+    edge_type: str,
+    query: str,
+    dsn: str | None = None,
+    dsn_env: str | None = None,
+    source: str = "id",
+    target_col: str = "to_id",
+    target_id_template: str = "{value}",
+    target_kind: str = "external",
+    name_col: str | None = None,
+    prop_cols: list[str] | None = None,
+    directions: str = "out",
+    ontology: str | None = None,
+) -> dict:
+    """Bind an edge TYPE to a SQL query that resolves its instances live from an
+    external source — no rows are copied into the graph (Ontology-Based Data
+    Access). At traversal time kg_edges runs `query`, parameterized by the node
+    you're standing on, and synthesizes the edges; results carry `_virtual: true`.
+
+    `query` must hold exactly one placeholder bound to the source value — the
+    driver's native marker ('?' for sqlite, '%s' for postgres). The value is
+    always *bound*, never string-formatted, so the query is injection-safe.
+
+    Source of the bound value (`source`): "id" (default), "id_slug" (after the
+    last ':'), or "prop:<key>" (a node property, e.g. "prop:ticker"). Each result
+    row yields one edge: `target_col` is the far-end value, `target_id_template`
+    (e.g. "company:{value}") builds its node id, `name_col` names it, `prop_cols`
+    (or every other column) become edge properties. `directions` is out|in|both.
+
+    Credentials: prefer `dsn_env` (an env-var *name*, resolved at query time) so
+    secrets stay out of the graph; `dsn` is the literal form for non-secret paths.
+    The binding is stored as a reserved `_VirtualEdge` node in the ontology.
+    """
+    ve = virtual.VirtualEdge(
+        edge_type=edge_type, query=query, dsn=dsn, dsn_env=dsn_env, source=source,
+        target_col=target_col, target_id_template=target_id_template,
+        target_kind=target_kind, name_col=name_col, prop_cols=list(prop_cols or []),
+        directions=directions,
+    )
+    virtual.register(_bundle(ontology).backend, ve)
+    return {"edge_type": edge_type, "directions": directions, "bound": True}
+
+
+@mcp.tool()
+def kg_virtual_edges_list(ontology: str | None = None) -> list[dict]:
+    """List the ontology's virtual-edge bindings (edge type, source, directions,
+    target shape, and the query). The connection string is shown by reference
+    (`dsn_env`) or literal (`dsn`) exactly as stored."""
+    return [
+        {
+            "edge_type": ve.edge_type, "directions": ve.directions, "source": ve.source,
+            "target_kind": ve.target_kind, "target_id_template": ve.target_id_template,
+            "dsn_env": ve.dsn_env, "dsn": ve.dsn, "query": ve.query,
+        }
+        for ve in virtual.list_bindings(_bundle(ontology).backend)
+    ]
+
+
+@mcp.tool()
+def kg_virtual_edge_remove(edge_type: str, ontology: str | None = None) -> dict:
+    """Remove a virtual-edge binding by type. The external source is untouched."""
+    removed = virtual.unregister(_bundle(ontology).backend, edge_type)
+    return {"edge_type": edge_type, "removed": removed}
 
 
 @mcp.tool()
