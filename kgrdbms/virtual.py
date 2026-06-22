@@ -183,12 +183,15 @@ def _connect(dsn: str):
     if dsn.startswith(("postgresql://", "postgres://")):
         try:
             import psycopg  # type: ignore
+            from psycopg.rows import dict_row  # type: ignore
         except ModuleNotFoundError as e:  # pragma: no cover - env dependent
             raise RuntimeError(
                 "virtual edge needs the postgres driver: pip install "
                 "'knowledge-graph-rdbms[postgres]'"
             ) from e
-        return psycopg.connect(dsn), "%s"
+        # dict_row so fetchall() yields mappings — resolve() does dict(row) on
+        # each, which would fail on psycopg's default tuple rows.
+        return psycopg.connect(dsn, row_factory=dict_row), "%s"
     path = dsn
     for prefix in ("sqlite:///", "sqlite://"):
         if path.startswith(prefix):

@@ -5,6 +5,7 @@ operational store (Postgres in production). The point is to prove the graph
 synthesizes edges from it on traversal without ever copying rows in.
 """
 
+import os
 import sqlite3
 
 import pytest
@@ -122,3 +123,37 @@ def test_binding_roundtrips_and_unregisters(tmp_path):
     assert virtual.unregister(g, "CO_HELD_WITH") is True
     assert virtual.list_bindings(g) == []
     g.close()
+
+
+# Live-Postgres regression: resolve() does dict(row) on every result, so the
+# postgres path MUST use a dict row factory — with psycopg's default tuple rows
+# dict(row) raises. This is the bug that shipped in 0.1.6 (the sqlite stand-in
+# tests above never exercised the postgres branch). Gated: set KG_TEST_PG_DSN
+# (a throwaway database) to run it.
+_PG_DSN = os.environ.get("KG_TEST_PG_DSN")
+
+
+@pytest.mark.skipif(not _PG_DSN, reason="set KG_TEST_PG_DSN to run the live-postgres virtual-edge test")
+def test_virtual_resolves_against_postgres(tmp_path):
+    psycopg = pytest.importorskip("psycopg")
+    table = "kg_ve_regression"
+    with psycopg.connect(_PG_DSN, autocommit=True) as c:
+        c.execute(f"DROP TABLE IF EXISTS {table}")
+        c.execute(f"CREATE TABLE {table} (a text, b text, shared int)")
+        c.cursor().executemany(
+            f"INSERT INTO {table} VALUES (%s,%s,%s)", [("NVDA", "AMD", 12), ("NVDA", "TSM", 9)]
+        )
+    try:
+        g = Graph(path=tmp_path / "kg.db")
+        virtual.register(g, VirtualEdge(
+            edge_type="CO_HELD_WITH", source="id_slug",
+            query=f"SELECT b AS to_id, shared FROM {table} WHERE a = %s",
+            dsn=_PG_DSN, target_id_template="company:{value}", prop_cols=["shared"],
+        ))
+        out = virtual.augment(g, "company:NVDA", "out", None)
+        assert sorted((e.to_node, e.properties["shared"]) for _d, e, _f in out) \
+            == [("company:AMD", 12), ("company:TSM", 9)]
+        g.close()
+    finally:
+        with psycopg.connect(_PG_DSN, autocommit=True) as c:
+            c.execute(f"DROP TABLE IF EXISTS {table}")
