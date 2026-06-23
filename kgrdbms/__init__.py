@@ -12,7 +12,7 @@ A small, dependency-free knowledge-graph core:
 
 from __future__ import annotations
 
-__version__ = "0.1.5"
+__version__ = "0.1.8"
 
 from kgrdbms.graph import Edge, Graph, Node, default_graph_path, slug
 from kgrdbms.federation import Federation, FederatedNode, Located

@@ -556,6 +556,57 @@ flowchart TB
     T --- E
 ```
 
+### Iceberg sources: virtualize the lakehouse
+
+The system-of-record isn't always an operational database. A lot of
+machine-generated relationship data lands in a **lakehouse** — Apache Iceberg
+tables in object storage, versioned by snapshot and governed by a catalog. A
+virtual edge can resolve straight out of Iceberg, with **DuckDB** as the scan
+engine, by setting `source_type="iceberg"`:
+
+```python
+kg_virtual_edge_add(
+    edge_type="CO_HELD_WITH",
+    query="SELECT b AS to_id, shared FROM co_held WHERE a = ?",  # '?' — DuckDB binds it
+    source_type="iceberg",
+    catalog={                          # pyiceberg catalog props; any value as
+        "name": "lake",                #   "env:VAR" is resolved from the env, so
+        "type": "rest",                #   tokens/keys never sit in the graph
+        "uri":  "env:ICEBERG_REST_URI",
+        "warehouse": "s3://lake/wh",
+    },
+    table="analytics.co_held",         # namespace.table — query uses the leaf name
+    # snapshot_id=...,                  # optional: pin a version for time-travel
+    source="id_slug", target_id_template="company:{value}",
+    prop_cols=["shared"], directions="both", ontology="market",
+)
+```
+
+The split mirrors Iceberg's own architecture: **pyiceberg owns identity and
+versioning** — it loads the catalog, maps `namespace.table` to the current
+metadata pointer (or a pinned `snapshot_id`), the layer a schema graph actually
+cares about; **DuckDB owns the scan** — it reads the resolved table (format
+version 2 today; newer versions as the extension gains them) and answers the
+binding's parameterized query. The table is exposed as a named DuckDB view, so
+the query is written against an ordinary table name — *identical* to the
+SQLite/Postgres case, and the resolver's bind path is unchanged. Install with the
+`iceberg` extra (`pip install 'knowledge-graph-rdbms[iceberg]'`).
+
+Any catalog pyiceberg speaks works — swap the `catalog` dict:
+
+| Catalog | `catalog` config |
+| --- | --- |
+| **AWS Glue** | `{"type": "glue"}` (region/creds from the AWS chain) |
+| **S3 Tables** (managed Iceberg) | `{"type": "rest", "uri": "https://s3tables.<region>.amazonaws.com/iceberg", "warehouse": "<table-bucket-arn>", "rest.sigv4-enabled": "true", "rest.signing-name": "s3tables", "rest.signing-region": "<region>"}` |
+| **Local / SQL catalog** | `{"type": "sql", "uri": "sqlite:///…", "warehouse": "file://…"}` |
+
+When the resolved metadata lives on `s3://` (S3 Tables, Glue, or a plain S3
+lake), the opener loads DuckDB's `httpfs`/`aws` extensions and a credential-chain
+secret automatically — DuckDB reads the managed storage with the host's AWS
+identity, sigv4 included. This is proven live against AWS S3 Tables in
+`tests/test_iceberg.py::test_s3tables_live_resolve` (opt-in via
+`KG_ICEBERG_S3TABLES_ARN`).
+
 Tools: `kg_virtual_edge_add`, `kg_virtual_edges_list`, `kg_virtual_edge_remove`.
 
 ---

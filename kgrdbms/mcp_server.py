@@ -332,16 +332,22 @@ def kg_virtual_edge_add(
     name_col: str | None = None,
     prop_cols: list[str] | None = None,
     directions: str = "out",
+    source_type: str = "sql",
+    catalog: dict | None = None,
+    table: str | None = None,
+    tables: list[str] | None = None,
+    snapshot_id: int | None = None,
     ontology: str | None = None,
 ) -> dict:
-    """Bind an edge TYPE to a SQL query that resolves its instances live from an
+    """Bind an edge TYPE to a query that resolves its instances live from an
     external source — no rows are copied into the graph (Ontology-Based Data
     Access). At traversal time kg_edges runs `query`, parameterized by the node
     you're standing on, and synthesizes the edges; results carry `_virtual: true`.
 
     `query` must hold exactly one placeholder bound to the source value — the
-    driver's native marker ('?' for sqlite, '%s' for postgres). The value is
-    always *bound*, never string-formatted, so the query is injection-safe.
+    driver's native marker ('?' for sqlite *and* iceberg/duckdb, '%s' for
+    postgres). The value is always *bound*, never string-formatted, so the query
+    is injection-safe.
 
     Source of the bound value (`source`): "id" (default), "id_slug" (after the
     last ':'), or "prop:<key>" (a node property, e.g. "prop:ticker"). Each result
@@ -349,18 +355,35 @@ def kg_virtual_edge_add(
     (e.g. "company:{value}") builds its node id, `name_col` names it, `prop_cols`
     (or every other column) become edge properties. `directions` is out|in|both.
 
-    Credentials: prefer `dsn_env` (an env-var *name*, resolved at query time) so
-    secrets stay out of the graph; `dsn` is the literal form for non-secret paths.
+    SOURCE_TYPE selects where `query` runs:
+      * "sql" (default) — a direct SQL store. Prefer `dsn_env` (an env-var *name*,
+        resolved at query time) so secrets stay out of the graph; `dsn` is the
+        literal form for non-secret paths.
+      * "iceberg" — an Apache Iceberg table in a lakehouse. Give `catalog` (a
+        pyiceberg catalog property dict, e.g. {"name","type","uri","warehouse"};
+        any value written "env:VAR" is resolved from the environment so creds stay
+        out of the graph) and `table` ("namespace.table"). pyiceberg resolves the
+        current metadata (or `snapshot_id` for a time-travel read); DuckDB scans it.
+        Write `query` against the table's leaf name, e.g.
+        "SELECT b AS to_id FROM co_held WHERE a = ?". To JOIN across tables in one
+        edge, pass `tables` (a list of "namespace.table"); each is mounted as a
+        view by its leaf name and the query may join them freely (`snapshot_id`
+        then doesn't apply — it pins a single table's version).
+
     The binding is stored as a reserved `_VirtualEdge` node in the ontology.
     """
     ve = virtual.VirtualEdge(
         edge_type=edge_type, query=query, dsn=dsn, dsn_env=dsn_env, source=source,
         target_col=target_col, target_id_template=target_id_template,
         target_kind=target_kind, name_col=name_col, prop_cols=list(prop_cols or []),
-        directions=directions,
+        directions=directions, source_type=source_type, catalog=catalog,
+        table=table, tables=list(tables or []), snapshot_id=snapshot_id,
     )
     virtual.register(_bundle(ontology).backend, ve)
-    return {"edge_type": edge_type, "directions": directions, "bound": True}
+    return {
+        "edge_type": edge_type, "directions": directions,
+        "source_type": source_type, "bound": True,
+    }
 
 
 @mcp.tool()
@@ -372,7 +395,9 @@ def kg_virtual_edges_list(ontology: str | None = None) -> list[dict]:
         {
             "edge_type": ve.edge_type, "directions": ve.directions, "source": ve.source,
             "target_kind": ve.target_kind, "target_id_template": ve.target_id_template,
-            "dsn_env": ve.dsn_env, "dsn": ve.dsn, "query": ve.query,
+            "source_type": ve.source_type, "dsn_env": ve.dsn_env, "dsn": ve.dsn,
+            "catalog": ve.catalog, "table": ve.table, "tables": list(ve.tables),
+            "snapshot_id": ve.snapshot_id, "query": ve.query,
         }
         for ve in virtual.list_bindings(_bundle(ontology).backend)
     ]
