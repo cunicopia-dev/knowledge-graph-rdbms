@@ -226,6 +226,58 @@ def test_s3tables_live_resolve():
     g.close()
 
 
+def test_core_stays_zero_dependency_without_iceberg_extra(tmp_path):
+    """The zero-dependency promise: with duckdb/pyiceberg/pyarrow absent, the
+    package still imports and every non-iceberg path works; only an iceberg
+    binding fails — and with a clear 'install the extra' hint, not a raw
+    ImportError. Run in a subprocess with those modules blocked at the finder."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import sys, importlib.abc
+        BLOCK = {"duckdb", "pyiceberg", "pyarrow"}
+        class Blocker(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name.split(".")[0] in BLOCK:
+                    raise ImportError("blocked " + name)
+                return None
+        sys.meta_path.insert(0, Blocker())
+        for m in [m for m in sys.modules if m.split(".")[0] in BLOCK]:
+            del sys.modules[m]
+
+        import tempfile, sqlite3
+        import kgrdbms
+        from kgrdbms.graph import Graph
+        from kgrdbms import virtual
+        from kgrdbms.virtual import VirtualEdge
+
+        # SQL virtual edge resolves with the iceberg libs gone.
+        p = tempfile.mktemp(suffix=".db"); c = sqlite3.connect(p)
+        c.execute("CREATE TABLE co(a TEXT, b TEXT)")
+        c.execute("INSERT INTO co VALUES('NVDA','AMD')"); c.commit(); c.close()
+        g = Graph(path=tempfile.mktemp(suffix=".db"))
+        ve = VirtualEdge(edge_type="X", query="SELECT b AS to_id FROM co WHERE a=?",
+                         dsn=p, source="id_slug", target_id_template="c:{value}")
+        assert [e.to_node for e, _ in virtual.resolve(ve, "c:NVDA", None, "out")] == ["c:AMD"]
+
+        # An iceberg binding fails with the install hint, not a raw ImportError.
+        ice = VirtualEdge(edge_type="Y", query="SELECT b AS to_id FROM t WHERE a=?",
+                          source_type="iceberg", catalog={"type": "sql"}, table="ns.t")
+        try:
+            virtual.resolve(ice, "c:NVDA", None, "out")
+            raise SystemExit("expected failure")
+        except RuntimeError as e:
+            assert "iceberg extra" in str(e), str(e)
+        print("OK")
+        """
+    )
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert out.returncode == 0 and "OK" in out.stdout, out.stderr
+
+
 def test_iceberg_requires_catalog_and_table(tmp_path):
     g = Graph(path=tmp_path / "kg.db")
     ve = VirtualEdge(

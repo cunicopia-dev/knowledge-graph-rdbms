@@ -76,7 +76,7 @@ def _load_table(catalog: dict[str, Any], table: str):
     """Load a pyiceberg table from a catalog config + ``namespace.table`` name."""
     try:
         from pyiceberg.catalog import load_catalog  # type: ignore
-    except ModuleNotFoundError as e:  # pragma: no cover - env dependent
+    except ImportError as e:  # pragma: no cover - env dependent
         raise RuntimeError(
             "iceberg virtual edge needs the iceberg extra: pip install "
             "'knowledge-graph-rdbms[iceberg]'"
@@ -142,7 +142,7 @@ def open_source(
     """
     try:
         import duckdb  # type: ignore
-    except ModuleNotFoundError as e:  # pragma: no cover - env dependent
+    except ImportError as e:  # pragma: no cover - env dependent
         raise RuntimeError(
             "iceberg virtual edge needs the iceberg extra: pip install "
             "'knowledge-graph-rdbms[iceberg]'"
