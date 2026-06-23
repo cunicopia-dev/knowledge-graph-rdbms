@@ -85,6 +85,36 @@ def _load_table(catalog: dict[str, Any], table: str):
     return load_catalog(name, **resolve_catalog_props(catalog)).load_table(table)
 
 
+def _s3_region(catalog: dict[str, Any]) -> str:
+    """Region for DuckDB's S3 access — catalog hint first, then the AWS env."""
+    import os
+
+    for key in ("rest.signing-region", "client.region", "region"):
+        if catalog.get(key):
+            return str(_resolve_env(catalog[key]))
+    return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+
+
+def _prepare_s3(conn: Any, catalog: dict[str, Any]) -> None:
+    """Give DuckDB what it needs to read s3:// metadata + data files.
+
+    Loads the httpfs/aws extensions and registers a credential-chain secret so
+    DuckDB authenticates with the same AWS identity as the host (env, profile,
+    instance role). This is what lets ``iceberg_scan`` reach S3 Tables' managed
+    storage and ordinary S3 warehouses alike — sigv4 signing included.
+    """
+    conn.execute("INSTALL httpfs")
+    conn.execute("LOAD httpfs")
+    conn.execute("INSTALL aws")
+    conn.execute("LOAD aws")
+    conn.execute("INSTALL iceberg")
+    conn.execute("LOAD iceberg")
+    region = _s3_region(catalog)
+    conn.execute(
+        f"CREATE SECRET (TYPE s3, PROVIDER credential_chain, REGION '{region}')"
+    )
+
+
 def _view_name(table: str) -> str:
     """The DuckDB view name a binding's query references — the table's leaf name.
 
@@ -117,10 +147,15 @@ def open_source(
     metadata_location = tbl.metadata_location
 
     conn = duckdb.connect()
-    # INSTALL is idempotent and cached; LOAD makes iceberg_scan available. Kept
-    # here (not at import) so importing this module never reaches the network.
-    conn.execute("INSTALL iceberg")
-    conn.execute("LOAD iceberg")
+    # INSTALL is idempotent and cached; kept here (not at import) so importing
+    # this module never reaches the network. An s3:// warehouse (S3 Tables, Glue,
+    # or a plain S3 lake) needs httpfs/aws + a credential secret; a local file
+    # warehouse needs only the iceberg extension.
+    if str(metadata_location).startswith("s3://"):
+        _prepare_s3(conn, catalog)
+    else:
+        conn.execute("INSTALL iceberg")
+        conn.execute("LOAD iceberg")
 
     view = _view_name(table)
     # The metadata location is operator-resolved (from the catalog), not user

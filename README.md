@@ -592,6 +592,21 @@ the query is written against an ordinary table name — *identical* to the
 SQLite/Postgres case, and the resolver's bind path is unchanged. Install with the
 `iceberg` extra (`pip install 'knowledge-graph-rdbms[iceberg]'`).
 
+Any catalog pyiceberg speaks works — swap the `catalog` dict:
+
+| Catalog | `catalog` config |
+| --- | --- |
+| **AWS Glue** | `{"type": "glue"}` (region/creds from the AWS chain) |
+| **S3 Tables** (managed Iceberg) | `{"type": "rest", "uri": "https://s3tables.<region>.amazonaws.com/iceberg", "warehouse": "<table-bucket-arn>", "rest.sigv4-enabled": "true", "rest.signing-name": "s3tables", "rest.signing-region": "<region>"}` |
+| **Local / SQL catalog** | `{"type": "sql", "uri": "sqlite:///…", "warehouse": "file://…"}` |
+
+When the resolved metadata lives on `s3://` (S3 Tables, Glue, or a plain S3
+lake), the opener loads DuckDB's `httpfs`/`aws` extensions and a credential-chain
+secret automatically — DuckDB reads the managed storage with the host's AWS
+identity, sigv4 included. This is proven live against AWS S3 Tables in
+`tests/test_iceberg.py::test_s3tables_live_resolve` (opt-in via
+`KG_ICEBERG_S3TABLES_ARN`).
+
 Tools: `kg_virtual_edge_add`, `kg_virtual_edges_list`, `kg_virtual_edge_remove`.
 
 ---

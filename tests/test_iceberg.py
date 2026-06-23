@@ -146,6 +146,49 @@ def test_binding_roundtrips_through_ontology(tmp_path):
     g.close()
 
 
+# --- live AWS integration -------------------------------------------------
+# Opt-in: set KG_ICEBERG_S3TABLES_ARN to a table-bucket ARN holding the SEC
+# form13f namespace (and have AWS creds in the environment). Proves the s3://
+# path — DuckDB reading S3 Tables' managed storage via httpfs + credential_chain.
+import os  # noqa: E402
+
+_S3TABLES_ARN = os.environ.get("KG_ICEBERG_S3TABLES_ARN")
+
+
+@pytest.mark.skipif(not _S3TABLES_ARN, reason="set KG_ICEBERG_S3TABLES_ARN to run")
+def test_s3tables_live_resolve():
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    catalog = {
+        "name": "s3tables",
+        "type": "rest",
+        "uri": f"https://s3tables.{region}.amazonaws.com/iceberg",
+        "warehouse": _S3TABLES_ARN,
+        "rest.sigv4-enabled": "true",
+        "rest.signing-name": "s3tables",
+        "rest.signing-region": region,
+    }
+    g = Graph(path="/tmp/kg_s3tables_it.db")
+    ve = VirtualEdge(
+        edge_type="HOLDS",
+        query=(
+            "SELECT matched_symbol AS to_id, name_of_issuer, value_normalized "
+            "FROM infotable WHERE manager_cik = ? AND matched_symbol IS NOT NULL "
+            "ORDER BY value_normalized DESC LIMIT 5"
+        ),
+        source_type="iceberg", catalog=catalog, table="form13f.infotable",
+        source="id_slug", target_id_template="issuer:{value}", target_kind="issuer",
+        name_col="name_of_issuer", prop_cols=["value_normalized"],
+    )
+    virtual.register(g, ve)
+    assert g.total_edges() == 0  # nothing copied — resolved live
+    # CIK 0000895421 is a large 13F filer with deep holdings.
+    out = virtual.augment(g, "manager:0000895421", "out", None)
+    assert out, "expected live holdings resolved from S3 Tables"
+    assert all(e.properties["_virtual"] is True for _, e, _ in out)
+    assert all(far.id.startswith("issuer:") for _, _, far in out)
+    g.close()
+
+
 def test_iceberg_requires_catalog_and_table(tmp_path):
     g = Graph(path=tmp_path / "kg.db")
     ve = VirtualEdge(
