@@ -97,7 +97,19 @@ class VirtualEdge:
     source_type: str = "sql"
     catalog: dict[str, Any] | None = None
     table: str | None = None
+    tables: list[str] = field(default_factory=list)
     snapshot_id: int | None = None
+
+    def iceberg_tables(self) -> list[str]:
+        """The full set of Iceberg tables to mount as DuckDB views for this
+        binding — the primary `table` plus any `tables`, de-duplicated, order
+        preserved. A binding's `query` may JOIN freely across all of them
+        (referenced by leaf name). Multiple tables let one edge stitch together,
+        say, a holdings fact table with a lookup dimension in a single query."""
+        seen: dict[str, None] = {}
+        for t in ([self.table] if self.table else []) + list(self.tables):
+            seen.setdefault(t, None)
+        return list(seen)
 
     # ---- (de)serialization to a reserved-kind node ----
 
@@ -117,6 +129,7 @@ class VirtualEdge:
             "source_type": self.source_type,
             "catalog": self.catalog,
             "table": self.table,
+            "tables": list(self.tables),
             "snapshot_id": self.snapshot_id,
         }
 
@@ -138,6 +151,7 @@ class VirtualEdge:
             source_type=p.get("source_type", "sql"),
             catalog=p.get("catalog"),
             table=p.get("table"),
+            tables=list(p.get("tables", [])),
             snapshot_id=p.get("snapshot_id"),
         )
 
@@ -231,14 +245,15 @@ def _open_source(ve: VirtualEdge) -> tuple[Any, str]:
     placeholder, so the rest of :func:`resolve` is source-agnostic.
     """
     if ve.source_type == "iceberg":
-        if not ve.catalog or not ve.table:
+        tables = ve.iceberg_tables()
+        if not ve.catalog or not tables:
             raise RuntimeError(
                 f"virtual edge {ve.edge_type!r}: source_type='iceberg' requires "
-                f"both `catalog` and `table`."
+                f"`catalog` and at least one of `table` / `tables`."
             )
         from kgrdbms import iceberg
 
-        return iceberg.open_source(ve.catalog, ve.table, ve.snapshot_id)
+        return iceberg.open_source(ve.catalog, tables, ve.snapshot_id)
     return _connect(ve.resolved_dsn())
 
 

@@ -125,15 +125,20 @@ def _view_name(table: str) -> str:
 
 
 def open_source(
-    catalog: dict[str, Any], table: str, snapshot_id: int | None = None
+    catalog: dict[str, Any],
+    tables: str | list[str],
+    snapshot_id: int | None = None,
 ) -> tuple[Any, str]:
-    """Open an Iceberg table as a queryable DuckDB connection.
+    """Open one or more Iceberg tables as a single queryable DuckDB connection.
 
-    Resolves ``table`` against ``catalog`` via pyiceberg (pinning ``snapshot_id``
-    if given), loads DuckDB's iceberg extension, and registers the table as a VIEW
-    named after its leaf segment. Returns ``(connection, marker)`` shaped exactly
-    like :func:`kgrdbms.virtual._connect`, so :func:`kgrdbms.virtual.resolve` runs
-    the binding's parameterized query against it with no special-casing.
+    Resolves each table in ``tables`` against ``catalog`` via pyiceberg and
+    registers it as a DuckDB VIEW named after its leaf segment, so the binding's
+    ``query`` may JOIN across them by plain table name. Returns
+    ``(connection, marker)`` shaped exactly like :func:`kgrdbms.virtual._connect`,
+    so :func:`kgrdbms.virtual.resolve` runs the parameterized query unchanged.
+
+    ``snapshot_id`` pins a time-travel version; a snapshot id is table-specific,
+    so it is only valid when mounting a single table.
     """
     try:
         import duckdb  # type: ignore
@@ -143,27 +148,36 @@ def open_source(
             "'knowledge-graph-rdbms[iceberg]'"
         ) from e
 
-    tbl = _load_table(catalog, table)
-    metadata_location = tbl.metadata_location
+    names = [tables] if isinstance(tables, str) else list(tables)
+    if not names:
+        raise RuntimeError("iceberg open_source: no tables to mount.")
+    if snapshot_id is not None and len(names) > 1:
+        raise RuntimeError(
+            "iceberg virtual edge: `snapshot_id` pins a single table's version "
+            "and cannot be used when mounting multiple tables."
+        )
+
+    resolved = [(_view_name(n), _load_table(catalog, n).metadata_location) for n in names]
 
     conn = duckdb.connect()
     # INSTALL is idempotent and cached; kept here (not at import) so importing
     # this module never reaches the network. An s3:// warehouse (S3 Tables, Glue,
     # or a plain S3 lake) needs httpfs/aws + a credential secret; a local file
-    # warehouse needs only the iceberg extension.
-    if str(metadata_location).startswith("s3://"):
+    # warehouse needs only the iceberg extension. One credential setup serves
+    # every view on the connection.
+    if any(str(loc).startswith("s3://") for _, loc in resolved):
         _prepare_s3(conn, catalog)
     else:
         conn.execute("INSTALL iceberg")
         conn.execute("LOAD iceberg")
 
-    view = _view_name(table)
-    # The metadata location is operator-resolved (from the catalog), not user
-    # input, so formatting it into the DDL is safe — and DuckDB's scan function
-    # takes a path literal, not a bound parameter, for the table source.
-    scan = f"iceberg_scan('{metadata_location}'"
-    if snapshot_id is not None:
-        scan += f", snapshot_from_id => {int(snapshot_id)}"
-    scan += ")"
-    conn.execute(f'CREATE VIEW "{view}" AS SELECT * FROM {scan}')
+    for view, metadata_location in resolved:
+        # The metadata location is operator-resolved (from the catalog), not user
+        # input, so formatting it into the DDL is safe — DuckDB's scan function
+        # takes a path literal, not a bound parameter, for the table source.
+        scan = f"iceberg_scan('{metadata_location}'"
+        if snapshot_id is not None:
+            scan += f", snapshot_from_id => {int(snapshot_id)}"
+        scan += ")"
+        conn.execute(f'CREATE VIEW "{view}" AS SELECT * FROM {scan}')
     return conn, MARKER

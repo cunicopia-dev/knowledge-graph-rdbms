@@ -78,6 +78,43 @@ def test_resolves_edges_from_iceberg_without_storing(tmp_path):
     g.close()
 
 
+def test_multi_table_join(tmp_path):
+    """A binding can mount several Iceberg tables and JOIN across them in one edge:
+    here a holdings table against a name-lookup dimension."""
+    props, _ = _warehouse(tmp_path)
+    # Add a lookup table to the same catalog.
+    cat = SqlCatalog(props["name"], **{k: v for k, v in props.items() if k != "name"})
+    names = pa.table({"b": ["AMD", "TSM", "MSFT"], "long_name": ["Advanced Micro", "Taiwan Semi", "Microsoft"]})
+    lk = cat.create_table("analytics.names", schema=names.schema, properties={"format-version": "2"})
+    lk.append(names)
+
+    g = Graph(path=tmp_path / "kg.db")
+    ve = VirtualEdge(
+        edge_type="CO_HELD_WITH",
+        query=(
+            "SELECT c.b AS to_id, n.long_name, c.shared "
+            "FROM co_held c JOIN names n ON c.b = n.b WHERE c.a = ?"
+        ),
+        source_type="iceberg", catalog=props,
+        table="analytics.co_held", tables=["analytics.names"],
+        source="id_slug", target_id_template="company:{value}",
+        target_kind="company", name_col="long_name", prop_cols=["shared"],
+    )
+    virtual.register(g, ve)
+    out = virtual.augment(g, "company:NVDA", "out", None)
+    by_target = {e.to_node: far.name for _, e, far in out}
+    assert by_target == {"company:AMD": "Advanced Micro", "company:TSM": "Taiwan Semi"}
+    # both tables resolved through iceberg_tables()
+    assert ve.iceberg_tables() == ["analytics.co_held", "analytics.names"]
+    g.close()
+
+
+def test_snapshot_pin_rejects_multiple_tables(tmp_path):
+    props, _ = _warehouse(tmp_path)
+    with pytest.raises(RuntimeError, match="single table"):
+        iceberg.open_source(props, ["analytics.co_held", "analytics.other"], snapshot_id=123)
+
+
 def test_format_version_2(tmp_path):
     _, tbl = _warehouse(tmp_path, fmt="2")
     assert tbl.metadata.format_version == 2

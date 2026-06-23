@@ -335,6 +335,7 @@ def kg_virtual_edge_add(
     source_type: str = "sql",
     catalog: dict | None = None,
     table: str | None = None,
+    tables: list[str] | None = None,
     snapshot_id: int | None = None,
     ontology: str | None = None,
 ) -> dict:
@@ -364,7 +365,10 @@ def kg_virtual_edge_add(
         out of the graph) and `table` ("namespace.table"). pyiceberg resolves the
         current metadata (or `snapshot_id` for a time-travel read); DuckDB scans it.
         Write `query` against the table's leaf name, e.g.
-        "SELECT b AS to_id FROM co_held WHERE a = ?".
+        "SELECT b AS to_id FROM co_held WHERE a = ?". To JOIN across tables in one
+        edge, pass `tables` (a list of "namespace.table"); each is mounted as a
+        view by its leaf name and the query may join them freely (`snapshot_id`
+        then doesn't apply — it pins a single table's version).
 
     The binding is stored as a reserved `_VirtualEdge` node in the ontology.
     """
@@ -373,7 +377,7 @@ def kg_virtual_edge_add(
         target_col=target_col, target_id_template=target_id_template,
         target_kind=target_kind, name_col=name_col, prop_cols=list(prop_cols or []),
         directions=directions, source_type=source_type, catalog=catalog,
-        table=table, snapshot_id=snapshot_id,
+        table=table, tables=list(tables or []), snapshot_id=snapshot_id,
     )
     virtual.register(_bundle(ontology).backend, ve)
     return {
@@ -392,8 +396,8 @@ def kg_virtual_edges_list(ontology: str | None = None) -> list[dict]:
             "edge_type": ve.edge_type, "directions": ve.directions, "source": ve.source,
             "target_kind": ve.target_kind, "target_id_template": ve.target_id_template,
             "source_type": ve.source_type, "dsn_env": ve.dsn_env, "dsn": ve.dsn,
-            "catalog": ve.catalog, "table": ve.table, "snapshot_id": ve.snapshot_id,
-            "query": ve.query,
+            "catalog": ve.catalog, "table": ve.table, "tables": list(ve.tables),
+            "snapshot_id": ve.snapshot_id, "query": ve.query,
         }
         for ve in virtual.list_bindings(_bundle(ontology).backend)
     ]
