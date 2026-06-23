@@ -498,6 +498,17 @@ traversal time the resolver runs that query, parameterized by the node you're
 standing on, and synthesizes the edges live. Zero copy, always current, one
 source of truth — Ontology-Based Data Access in the graph's own terms.
 
+```mermaid
+flowchart LR
+    Q(["kg_edges('company:NVDA')"]) --> U{"union traversal"}
+    STORE[("event-sourced graph<br/>curated, logged edges")] -->|"stored edges"| U
+    U -->|"for each _VirtualEdge binding"| R["resolver<br/>runs bound SQL, ? = 'NVDA'"]
+    R -.->|"parameterized query"| EXT[("operational store<br/>system-of-record")]
+    EXT -.->|"rows → synthesized edges<br/>_virtual: true"| R
+    R --> U
+    U --> OUT[/"merged edge list<br/>stored + live"/]
+```
+
 ```python
 # Bind CO_HELD_WITH to a query over the operational store (here, any DB-API source)
 kg_virtual_edge_add(
@@ -529,6 +540,21 @@ travel with it and version alongside the schema. This is the seam for a
 schema-graph / data-graph split: keep the curated **schema** (types, contracts,
 doctrine) in a portable SQLite ontology, and **virtualize the populated extension**
 straight out of your system-of-record — no ETL, no drift.
+
+```mermaid
+flowchart TB
+    subgraph SG["schema graph — portable SQLite ontology"]
+        T["types · contracts · doctrine"]
+        B["_VirtualEdge bindings<br/>(edge TYPE + SQL + dsn_env)"]
+    end
+    subgraph DG["data graph — virtualized extension"]
+        E["live edges, resolved on traversal"]
+    end
+    SOR[("system-of-record<br/>operational store")]
+    B -.->|"resolves against"| SOR
+    SOR -.->|"synthesizes"| E
+    T --- E
+```
 
 Tools: `kg_virtual_edge_add`, `kg_virtual_edges_list`, `kg_virtual_edge_remove`.
 
