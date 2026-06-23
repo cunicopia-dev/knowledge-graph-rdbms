@@ -34,6 +34,7 @@ discoverable via the ordinary read tools.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -88,6 +89,15 @@ class VirtualEdge:
     name_col: str | None = None
     prop_cols: list[str] = field(default_factory=list)
     directions: str = "out"
+    # ---- source kind ----
+    # "sql" (default) resolves against dsn/dsn_env via _connect. "iceberg" resolves
+    # against an Apache Iceberg table named by `catalog` + `table` (see iceberg.py);
+    # the binding's query then references the table by its leaf name like any SQL
+    # relation. `snapshot_id` optionally pins a version for time-travel reads.
+    source_type: str = "sql"
+    catalog: dict[str, Any] | None = None
+    table: str | None = None
+    snapshot_id: int | None = None
 
     # ---- (de)serialization to a reserved-kind node ----
 
@@ -104,6 +114,10 @@ class VirtualEdge:
             "name_col": self.name_col,
             "prop_cols": list(self.prop_cols),
             "directions": self.directions,
+            "source_type": self.source_type,
+            "catalog": self.catalog,
+            "table": self.table,
+            "snapshot_id": self.snapshot_id,
         }
 
     @classmethod
@@ -121,6 +135,10 @@ class VirtualEdge:
             name_col=p.get("name_col"),
             prop_cols=list(p.get("prop_cols", [])),
             directions=p.get("directions", "out"),
+            source_type=p.get("source_type", "sql"),
+            catalog=p.get("catalog"),
+            table=p.get("table"),
+            snapshot_id=p.get("snapshot_id"),
         )
 
     def resolved_dsn(self) -> str:
@@ -204,6 +222,26 @@ def _connect(dsn: str):
     return conn, "?"
 
 
+def _open_source(ve: VirtualEdge) -> tuple[Any, str]:
+    """Open the binding's external source, returning ``(connection, marker)``.
+
+    Dispatches on ``source_type``: an Iceberg binding goes through the lakehouse
+    opener (catalog → DuckDB view); everything else is a direct SQL connection to
+    ``dsn``/``dsn_env``. Both return a DB-API connection plus its positional
+    placeholder, so the rest of :func:`resolve` is source-agnostic.
+    """
+    if ve.source_type == "iceberg":
+        if not ve.catalog or not ve.table:
+            raise RuntimeError(
+                f"virtual edge {ve.edge_type!r}: source_type='iceberg' requires "
+                f"both `catalog` and `table`."
+            )
+        from kgrdbms import iceberg
+
+        return iceberg.open_source(ve.catalog, ve.table, ve.snapshot_id)
+    return _connect(ve.resolved_dsn())
+
+
 def _source_value(ve: VirtualEdge, node_id: str, node: Node | None) -> Any:
     if ve.source == "id":
         return node_id
@@ -237,11 +275,19 @@ def resolve(
     value = _source_value(ve, node_id, node)
     if value is None:
         return []
-    conn, marker = _connect(ve.resolved_dsn())
+    conn, marker = _open_source(ve)
     try:
         n_params = ve.query.count(marker)
         cur = conn.execute(ve.query, tuple([value] * max(1, n_params)))
-        rows = [dict(r) for r in cur.fetchall()]
+        fetched = cur.fetchall()
+        # Normalize to dict rows across drivers: sqlite Row and psycopg dict_row
+        # are already mappings; duckdb yields positional tuples, so zip them with
+        # the cursor's column names.
+        cols = [d[0] for d in cur.description] if cur.description else []
+        rows = [
+            dict(r) if isinstance(r, Mapping) else dict(zip(cols, r))
+            for r in fetched
+        ]
     finally:
         conn.close()
 

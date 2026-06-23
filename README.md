@@ -556,6 +556,42 @@ flowchart TB
     T --- E
 ```
 
+### Iceberg sources: virtualize the lakehouse
+
+The system-of-record isn't always an operational database. A lot of
+machine-generated relationship data lands in a **lakehouse** — Apache Iceberg
+tables in object storage, versioned by snapshot and governed by a catalog. A
+virtual edge can resolve straight out of Iceberg, with **DuckDB** as the scan
+engine, by setting `source_type="iceberg"`:
+
+```python
+kg_virtual_edge_add(
+    edge_type="CO_HELD_WITH",
+    query="SELECT b AS to_id, shared FROM co_held WHERE a = ?",  # '?' — DuckDB binds it
+    source_type="iceberg",
+    catalog={                          # pyiceberg catalog props; any value as
+        "name": "lake",                #   "env:VAR" is resolved from the env, so
+        "type": "rest",                #   tokens/keys never sit in the graph
+        "uri":  "env:ICEBERG_REST_URI",
+        "warehouse": "s3://lake/wh",
+    },
+    table="analytics.co_held",         # namespace.table — query uses the leaf name
+    # snapshot_id=...,                  # optional: pin a version for time-travel
+    source="id_slug", target_id_template="company:{value}",
+    prop_cols=["shared"], directions="both", ontology="market",
+)
+```
+
+The split mirrors Iceberg's own architecture: **pyiceberg owns identity and
+versioning** — it loads the catalog, maps `namespace.table` to the current
+metadata pointer (or a pinned `snapshot_id`), the layer a schema graph actually
+cares about; **DuckDB owns the scan** — it reads the resolved table (format
+version 2 today; newer versions as the extension gains them) and answers the
+binding's parameterized query. The table is exposed as a named DuckDB view, so
+the query is written against an ordinary table name — *identical* to the
+SQLite/Postgres case, and the resolver's bind path is unchanged. Install with the
+`iceberg` extra (`pip install 'knowledge-graph-rdbms[iceberg]'`).
+
 Tools: `kg_virtual_edge_add`, `kg_virtual_edges_list`, `kg_virtual_edge_remove`.
 
 ---
