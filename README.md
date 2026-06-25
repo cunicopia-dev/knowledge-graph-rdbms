@@ -1,5 +1,7 @@
 # knowledge-graph-rdbms
 
+<!-- mcp-name: io.github.cunicopia-dev/knowledge-graph-rdbms -->
+
 ![PyPI](https://img.shields.io/pypi/v/knowledge-graph-rdbms?logo=pypi&logoColor=white&color=3775A9)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)

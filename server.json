@@ -1,0 +1,49 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cunicopia-dev/knowledge-graph-rdbms",
+  "title": "Knowledge Graph RDBMS",
+  "description": "A label property graph on SQLite/Postgres with multi-ontology routing and a gated MCP server.",
+  "repository": {
+    "url": "https://github.com/cunicopia-dev/knowledge-graph-rdbms",
+    "source": "github"
+  },
+  "version": "0.1.9",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "knowledge-graph-rdbms",
+      "version": "0.1.9",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "uvx",
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--from",
+          "value": "knowledge-graph-rdbms[mcp]"
+        },
+        {
+          "type": "positional",
+          "value": "kgrdbms-mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "KGRDBMS_HOME",
+          "description": "Storage root for ontology databases and the event log. Defaults to ~/.kgrdbms.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "KGRDBMS_DEFAULT_ONTOLOGY",
+          "description": "Name of the default ontology used when a tool call omits the `ontology` argument. Defaults to \"default\".",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
