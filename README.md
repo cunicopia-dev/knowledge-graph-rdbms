@@ -10,13 +10,40 @@
 ![storage: SQLite + Postgres](https://img.shields.io/badge/storage-SQLite_%2B_Postgres-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
-**A knowledge graph for modeling _meaning_ — entities, the kinds of things they
-are, and the relationships between them — in a single SQLite file.**
+**Embedded knowledge graphs for AI agents.**
 
-No graph database. No Cypher. No server, no JVM, no Docker. Five tables, a small
-Python API, and — when you want them — an [MCP](https://modelcontextprotocol.io)
-server and a `kg` command line. The core library has **zero third-party
-dependencies**.
+SQLite-native · zero-dependency core · [MCP](https://modelcontextprotocol.io)-ready · event-sourced · reversible.
+
+Use it when you want agents to read and write structured memory — without
+running Neo4j, RDF, Docker, or a separate graph service. No Cypher, no JVM, no
+server: five tables and one file you can copy, inspect, and version.
+
+```bash
+pip install "knowledge-graph-rdbms[mcp]"
+
+# write a fact — auto-creates the graph in one SQLite file
+kg node add person:ada --kind Person --name "Ada Lovelace"
+
+# every write is logged; tail the log and roll any event back by id
+kg events -n 5
+kg revert <event_id>
+
+# rebuild the graph as of any past moment — literal time travel
+kg replay --upto 2026-01-01T00:00:00
+
+# expose the whole graph to an AI agent over MCP
+kg serve
+```
+
+```
+   Agent / CLI / Python
+            │
+     gated + logged writes
+            │
+   SQLite label property graph
+            │
+    replay · revert · time-travel
+```
 
 > Python 3.10+ · MIT · zero-dependency core · library + CLI + MCP
 
@@ -44,6 +71,7 @@ Small enough to hold in your head. Flexible enough to model anything.
 ## Contents
 
 - [Where it fits](#where-it-fits)
+- [Why not X?](#why-not-x)
 - [The idea in 30 seconds](#the-idea-in-30-seconds)
 - [Design philosophy](#design-philosophy)
 - [The data model](#the-data-model)
@@ -83,6 +111,36 @@ nodes** — the same sweet spot as SQLite itself: one file, in-process, no serve
 to run. That covers a surprising amount of real work. For workloads past that
 center, [Performance](#performance) maps out exactly where the curve bends and a
 purpose-built graph engine starts to earn its extra moving parts.
+
+---
+
+## Why not X?
+
+Honest comparisons — reach for the right tool, and know exactly when that tool
+is this one.
+
+### Why not Neo4j?
+
+Use **Neo4j** when you need deep traversal, complex Cypher pattern matching,
+concurrent writers, or clustered graph infrastructure. Use **kgrdbms** when you
+want a small embedded graph, agent memory, auditability, local-first ownership,
+and SQLite deployment simplicity.
+
+### Why not NetworkX?
+
+**NetworkX** is great for in-memory algorithms. **kgrdbms** is for persistent
+graph state with durable storage, CLI/MCP access, event history, and rollback.
+
+### Why not RDFLib?
+
+**RDFLib** is for RDF graphs and linked-data workflows. **kgrdbms** is a label
+property graph with RDF as an export/import boundary, not a triplestore.
+
+### Why not just SQLite tables?
+
+Because some domains are naturally entities and relationships, not rectangular
+tables. **kgrdbms** keeps the storage boring while making the model
+graph-shaped.
 
 ---
 
