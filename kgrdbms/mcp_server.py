@@ -63,7 +63,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised via the CLI
+    raise SystemExit(
+        "The MCP server needs the optional 'mcp' dependency, which isn't installed.\n"
+        "Install the extra:\n"
+        "    pip install 'knowledge-graph-rdbms[mcp]'\n"
+        "or run it directly with:\n"
+        "    uvx --from 'knowledge-graph-rdbms[mcp]' kgrdbms-mcp"
+    ) from exc
 
 from kgrdbms import backbone, rdf, resolver, service, virtual
 from kgrdbms.federation import FederatedNode, Federation, Located
