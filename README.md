@@ -10,13 +10,14 @@
 ![storage: SQLite + Postgres](https://img.shields.io/badge/storage-SQLite_%2B_Postgres-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
-**Embedded knowledge graphs for AI agents.**
+**An embedded knowledge graph you own completely — in one SQLite file.**
 
 SQLite-native · zero-dependency core · [MCP](https://modelcontextprotocol.io)-ready · event-sourced · reversible.
 
-Use it when you want agents to read and write structured memory — without
-running Neo4j, RDF, Docker, or a separate graph service. No Cypher, no JVM, no
-server: five tables and one file you can copy, inspect, and version.
+Model anything as entities and relationships — **agent memory**, app ontologies,
+declarative datasets, "SQLite but my data is a graph" — without running Neo4j,
+RDF, Docker, or a separate graph service. No Cypher, no JVM, no server: five
+tables and one file you can copy, inspect, and version.
 
 ```bash
 pip install "knowledge-graph-rdbms[mcp]"
