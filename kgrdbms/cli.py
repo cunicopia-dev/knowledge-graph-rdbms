@@ -611,7 +611,8 @@ def cmd_serve(app: App, args) -> int:
               file=sys.stderr)
         return 1
     app.close()  # the server opens its own graph
-    mcp_server.serve(transport=args.transport)
+    mcp_server.serve(transport=args.transport, host=args.host, port=args.port,
+                     allow_hosts=args.allow_hosts)
     return 0
 
 
@@ -873,6 +874,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("serve", help="run the MCP server (needs the 'mcp' extra)")
     a.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http"])
+    a.add_argument("--host", help="bind address for HTTP transports (default: 127.0.0.1)")
+    a.add_argument("--port", type=int, help="bind port for HTTP transports (default: 8000)")
+    a.add_argument(
+        "--allow-host", action="append", dest="allow_hosts", metavar="HOST",
+        help="extra Host header value clients connect by, e.g. 'name.example:*' "
+             "(repeatable; bind host + localhost always allowed; '*' disables checking)",
+    )
     a.set_defaults(func=cmd_serve)
 
     return p

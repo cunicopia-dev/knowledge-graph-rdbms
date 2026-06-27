@@ -61,6 +61,8 @@ set KGRDBMS_DEFAULT_ONTOLOGY.
 
 from __future__ import annotations
 
+import hmac
+import os
 from typing import Any
 
 try:
@@ -689,8 +691,115 @@ def kg_replay(upto_ts: str | None = None, ontology: str | None = None) -> dict:
 # =====================================================================
 
 
-def serve(transport: str = "stdio") -> None:
-    """Run the MCP server. Transports: stdio (default), sse, streamable-http."""
+TOKEN_ENV = "KGRDBMS_MCP_TOKEN"
+
+
+def _require_bearer(app, token: str):
+    """Wrap an ASGI app so HTTP requests must carry `Authorization: Bearer <token>`.
+
+    Pure ASGI — no new dependency (starlette/uvicorn already ride in with the
+    `[mcp]` extra, and the comparison is stdlib `hmac`). Only HTTP scopes are
+    guarded; lifespan/other scopes pass straight through. The token is compared
+    in constant time so a wrong guess leaks no timing signal.
+    """
+    expected = f"Bearer {token}"
+
+    async def guarded(scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers") or [])
+            presented = headers.get(b"authorization", b"").decode("latin-1")
+            if not hmac.compare_digest(presented, expected):
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b'{"error":"unauthorized"}',
+                })
+                return
+        await app(scope, receive, send)
+
+    return guarded
+
+
+def _configure_host_allowlist(host: str, allow_hosts: list[str]) -> None:
+    """Set the transport's DNS-rebinding Host allowlist for an HTTP bind.
+
+    FastMCP auto-enables DNS-rebinding protection with a *localhost-only* Host
+    allowlist (it's constructed with the default 127.0.0.1 bind). Once you bind
+    elsewhere, that baked-in allowlist would reject every real request (HTTP
+    421), so we rebuild it for the actual bind.
+
+    Secure by default: protection stays on; the bind host and localhost are
+    auto-allowed. Pass extra hostnames clients use (e.g. a Tailscale MagicDNS
+    name) via ``allow_hosts``; the ``host:*`` wildcard matches any port. The
+    sentinel ``"*"`` disables Host checking entirely — for when a fronting proxy
+    already validates it.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    if "*" in allow_hosts:
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
+        return
+
+    hosts = [f"{host}:*", "127.0.0.1:*", "localhost:*", "[::1]:*", *allow_hosts]
+    origins = [f"http://{h}" for h in hosts] + [f"https://{h}" for h in hosts]
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
+def serve(
+    transport: str = "stdio",
+    host: str | None = None,
+    port: int | None = None,
+    allow_hosts: list[str] | None = None,
+) -> None:
+    """Run the MCP server.
+
+    Transports: stdio (default; a private pipe to one local client), sse, and
+    streamable-http. The HTTP transports bind to ``host``/``port`` (defaults:
+    127.0.0.1 — localhost only; widening the bind is always a deliberate opt-in).
+
+    When the ``KGRDBMS_MCP_TOKEN`` env var is set, the HTTP transports require an
+    ``Authorization: Bearer <token>`` header — so the graph can be served over a
+    wire (e.g. a private mesh like Tailscale) with the connection authenticated.
+    stdio is unaffected. With no token set, behavior is unchanged.
+
+    ``allow_hosts`` extends the DNS-rebinding Host allowlist with the hostnames
+    clients connect by (the bind host and localhost are always allowed); ``"*"``
+    disables Host checking for proxy-fronted setups. See
+    :func:`_configure_host_allowlist`.
+    """
+    if host is not None:
+        mcp.settings.host = host
+    if port is not None:
+        mcp.settings.port = port
+
+    if transport in ("streamable-http", "sse"):
+        _configure_host_allowlist(mcp.settings.host, list(allow_hosts or []))
+
+    token = os.environ.get(TOKEN_ENV)
+    if transport in ("streamable-http", "sse") and token:
+        import uvicorn  # provided by the [mcp] extra; no new dependency
+
+        app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
+        uvicorn.run(
+            _require_bearer(app, token),
+            host=mcp.settings.host,
+            port=mcp.settings.port,
+        )
+        return
+
     mcp.run(transport=transport)
 
 
@@ -701,8 +810,19 @@ def main() -> None:  # pragma: no cover
     parser.add_argument(
         "--transport", default="stdio", choices=["stdio", "sse", "streamable-http"]
     )
+    parser.add_argument("--host", help="bind address for HTTP transports (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, help="bind port for HTTP transports (default: 8000)")
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        dest="allow_hosts",
+        metavar="HOST",
+        help="extra Host header value clients connect by, e.g. 'name.example:*' "
+        "(repeatable; bind host + localhost are always allowed; '*' disables checking)",
+    )
     args = parser.parse_args()
-    serve(transport=args.transport)
+    serve(transport=args.transport, host=args.host, port=args.port,
+          allow_hosts=args.allow_hosts)
 
 
 if __name__ == "__main__":  # pragma: no cover

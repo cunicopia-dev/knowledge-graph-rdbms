@@ -241,3 +241,83 @@ def test_replay_rebuilds_projection(mcp_mod):
     report = mcp_mod.kg_replay()
     assert report["events_applied"] >= 1
     assert mcp_mod.kg_node_get("e:3") is not None
+
+
+# ---- HTTP bearer auth (the _require_bearer ASGI wrapper) --------------
+#
+# Drives the wrapper as a pure ASGI app (no uvicorn, no sockets): a fake
+# downstream records whether it was reached, and a fake send() collects the
+# response messages. This is the same wrapper served over streamable-http.
+
+import asyncio
+
+
+def _drive(app, scope):
+    """Run an ASGI app once against a scope; return (downstream_reached, messages)."""
+    reached = {"hit": False}
+
+    async def downstream(s, receive, send):
+        reached["hit"] = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    from kgrdbms.mcp_server import _require_bearer
+
+    guarded = _require_bearer(downstream, "s3cret")
+    asyncio.run(guarded(scope, receive, send))
+    return reached["hit"], sent
+
+
+def _http_scope(auth: bytes | None):
+    headers = [(b"authorization", auth)] if auth is not None else []
+    return {"type": "http", "method": "POST", "path": "/mcp", "headers": headers}
+
+
+def test_bearer_missing_header_is_401(mcp_mod):
+    reached, sent = _drive(mcp_mod, _http_scope(None))
+    assert reached is False
+    assert sent[0]["status"] == 401
+
+
+def test_bearer_wrong_token_is_401(mcp_mod):
+    reached, sent = _drive(mcp_mod, _http_scope(b"Bearer nope"))
+    assert reached is False
+    assert sent[0]["status"] == 401
+
+
+def test_bearer_correct_token_passes_through(mcp_mod):
+    reached, sent = _drive(mcp_mod, _http_scope(b"Bearer s3cret"))
+    assert reached is True
+    assert sent[0]["status"] == 200
+
+
+def test_bearer_lifespan_scope_passes_through(mcp_mod):
+    # Non-HTTP scopes (e.g. lifespan) must never be blocked by the auth gate.
+    reached, _ = _drive(mcp_mod, {"type": "lifespan"})
+    assert reached is True
+
+
+# ---- DNS-rebinding Host allowlist (the HTTP bind fix) -----------------
+
+
+def test_allowlist_includes_bind_host_and_localhost(mcp_mod):
+    mcp_mod._configure_host_allowlist("100.64.0.1", ["myhost.example:*"])
+    ts = mcp_mod.mcp.settings.transport_security
+    assert ts.enable_dns_rebinding_protection is True
+    assert "100.64.0.1:*" in ts.allowed_hosts        # the bind host
+    assert "127.0.0.1:*" in ts.allowed_hosts         # localhost always allowed
+    assert "myhost.example:*" in ts.allowed_hosts    # caller-supplied hostname
+
+
+def test_allowlist_star_disables_protection(mcp_mod):
+    mcp_mod._configure_host_allowlist("0.0.0.0", ["*"])
+    ts = mcp_mod.mcp.settings.transport_security
+    assert ts.enable_dns_rebinding_protection is False

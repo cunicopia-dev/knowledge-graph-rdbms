@@ -834,6 +834,57 @@ Every tool takes an optional `ontology` name, and `kg_ontologies_list` /
 `kg_ontology_create` / `kg_ontology_delete` manage the registry — so an agent can
 discover, create, route between, and delete ontologies entirely over MCP.
 
+#### Serving remotely (authenticated)
+
+stdio is a private pipe to one local client. To reach the *same* graph from other
+machines — a second laptop, a phone, agents on a private mesh like
+[Tailscale](https://tailscale.com) — serve it over HTTP instead. It's the same
+engine and the same file; only the front-door transport changes, and it's purely
+additive: with no flags `kg serve` is still stdio, byte-for-byte.
+
+```bash
+# bind an HTTP transport; require a bearer token on every request
+export KGRDBMS_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+kg serve --transport streamable-http --host 0.0.0.0 --port 8970
+```
+
+- `--host` / `--port` choose the bind address (defaults `127.0.0.1:8000` —
+  localhost-only; widening the bind is always a deliberate opt-in).
+- `--allow-host HOST` declares the `Host` header values clients connect by. The
+  MCP transport has DNS-rebinding protection on by default, so once you bind off
+  localhost you must list the hostname/IP clients use (the bind host and
+  localhost are always allowed). Repeatable; the `host:*` form matches any port;
+  the sentinel `--allow-host '*'` turns Host checking off when a fronting proxy
+  already validates it. Example: `--allow-host graph.example.com:*`.
+- When `KGRDBMS_MCP_TOKEN` is set, the HTTP transports (`streamable-http`, `sse`)
+  reject any request without a matching `Authorization: Bearer <token>` header
+  (constant-time compared). The token is read from the environment — never a flag,
+  so it stays out of your shell history and process list. stdio ignores it.
+- **Zero new dependencies.** The check is a small ASGI wrapper using only the
+  stdlib (`hmac`) over the `uvicorn`/`starlette` that the `[mcp]` extra already
+  installs. Auth is on the connection; the [invariants + policy
+  gate](#the-safety-gate-invariants-vs-policy) still governs *what* a connected
+  client may change.
+
+Point a client at the URL — Claude Code speaks remote HTTP MCP natively:
+
+```bash
+claude mcp add --transport http kgrdbms https://your-host:8970/mcp \
+  --header "Authorization: Bearer $KGRDBMS_MCP_TOKEN"
+```
+
+```json
+{ "mcpServers": { "kgrdbms": {
+    "type": "http",
+    "url": "https://your-host:8970/mcp",
+    "headers": { "Authorization": "Bearer ${KGRDBMS_MCP_TOKEN}" }
+} } }
+```
+
+The token authenticates the connection but doesn't encrypt it. Run it over a
+network that provides transport security (a WireGuard/Tailscale mesh, or a TLS
+reverse proxy) rather than exposing a plain `http://` port to the open internet.
+
 ---
 
 ## Performance
