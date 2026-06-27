@@ -3,6 +3,7 @@
 <!-- mcp-name: io.github.cunicopia-dev/knowledge-graph-rdbms -->
 
 ![PyPI](https://img.shields.io/pypi/v/knowledge-graph-rdbms?logo=pypi&logoColor=white&color=3775A9)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/knowledge-graph-rdbms?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/knowledge-graph-rdbms)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
