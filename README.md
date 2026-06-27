@@ -3,12 +3,11 @@
 <!-- mcp-name: io.github.cunicopia-dev/knowledge-graph-rdbms -->
 
 ![PyPI](https://img.shields.io/pypi/v/knowledge-graph-rdbms?logo=pypi&logoColor=white&color=3775A9)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/knowledge-graph-rdbms?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/knowledge-graph-rdbms)
+[![Downloads](https://img.shields.io/pepy/dt/knowledge-graph-rdbms?logo=pypi&logoColor=white&label=downloads&color=success)](https://pepy.tech/projects/knowledge-graph-rdbms)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![core dependencies: 0](https://img.shields.io/badge/core_dependencies-0-success)
 ![tests: 107 passing](https://img.shields.io/badge/tests-107_passing-brightgreen)
-![storage: SQLite + Postgres](https://img.shields.io/badge/storage-SQLite_%2B_Postgres-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
 **An embedded knowledge graph you own completely — in one SQLite file.**
