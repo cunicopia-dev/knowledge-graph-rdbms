@@ -7,12 +7,12 @@
     "url": "https://github.com/cunicopia-dev/knowledge-graph-rdbms",
     "source": "github"
   },
-  "version": "0.1.10",
+  "version": "0.1.11",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "knowledge-graph-rdbms",
-      "version": "0.1.10",
+      "version": "0.1.11",
       "transport": {
         "type": "stdio"
       },
