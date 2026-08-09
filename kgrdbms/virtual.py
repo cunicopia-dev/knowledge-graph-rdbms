@@ -277,6 +277,59 @@ def _row_to_props(ve: VirtualEdge, row: dict) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in skip}
 
 
+def _fetch_rows_via_engine(ve: VirtualEdge, value: Any) -> list[dict] | None:
+    """Resolve a binding's rows through the lake-engine binary, or None to fall
+    back to the pure-Python path.
+
+    Returns None (no delegation) when: no `KGRDBMS_LAKE_ENGINE` configured, or
+    the binding uses a source shape the binary doesn't cover yet (only sql/pg,
+    sqlite, and S3-Tables iceberg are wired). Any engine error also returns None
+    so a misconfigured binary degrades to the working Python path rather than
+    breaking traversal.
+    """
+    import os
+
+    binary = os.environ.get("KGRDBMS_LAKE_ENGINE")
+    if not binary:
+        return None
+
+    # The binary binds on the '?' marker regardless of source; a Postgres
+    # binding is authored with '%s', so normalize before sending.
+    query = ve.query
+    req: dict[str, Any] = {"mode": "virtual", "value": value}
+    if ve.source_type == "iceberg":
+        # Only the S3 Tables catalog is wired in the binary today; a pyiceberg
+        # dict catalog (Glue/REST) still goes through Python.
+        warehouse = (ve.catalog or {}).get("warehouse", "")
+        if not str(warehouse).startswith("arn:aws:s3tables:"):
+            return None
+        req["source_type"] = "iceberg"
+        req["bucket_arn"] = warehouse
+    else:
+        dsn = ve.resolved_dsn()
+        if dsn.startswith(("postgresql://", "postgres://")):
+            query = query.replace("%s", "?")
+        req["source_type"] = "sql"
+        req["dsn"] = dsn
+    req["query"] = query
+
+    import json
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [binary], input=json.dumps(req), capture_output=True, text=True, timeout=60
+        )
+        if out.returncode != 0:
+            return None
+        payload = json.loads(out.stdout)
+        if "rows" not in payload:
+            return None
+        return payload["rows"]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def resolve(
     ve: VirtualEdge, node_id: str, node: Node | None, direction: str
 ) -> list[tuple[Edge, Node]]:
@@ -290,21 +343,28 @@ def resolve(
     value = _source_value(ve, node_id, node)
     if value is None:
         return []
-    conn, marker = _open_source(ve)
-    try:
-        n_params = ve.query.count(marker)
-        cur = conn.execute(ve.query, tuple([value] * max(1, n_params)))
-        fetched = cur.fetchall()
-        # Normalize to dict rows across drivers: sqlite Row and psycopg dict_row
-        # are already mappings; duckdb yields positional tuples, so zip them with
-        # the cursor's column names.
-        cols = [d[0] for d in cur.description] if cur.description else []
-        rows = [
-            dict(r) if isinstance(r, Mapping) else dict(zip(cols, r))
-            for r in fetched
-        ]
-    finally:
-        conn.close()
+
+    # If a lake-engine binary is configured (KGRDBMS_LAKE_ENGINE), delegate the
+    # fetch to it: a compiled Rust+DuckDB resolver that skips the per-hop
+    # pyiceberg import and connection churn. Pure-Python path is the fallback,
+    # so OSS installs with no binary configured behave exactly as before.
+    rows = _fetch_rows_via_engine(ve, value)
+    if rows is None:
+        conn, marker = _open_source(ve)
+        try:
+            n_params = ve.query.count(marker)
+            cur = conn.execute(ve.query, tuple([value] * max(1, n_params)))
+            fetched = cur.fetchall()
+            # Normalize to dict rows across drivers: sqlite Row and psycopg dict_row
+            # are already mappings; duckdb yields positional tuples, so zip them with
+            # the cursor's column names.
+            cols = [d[0] for d in cur.description] if cur.description else []
+            rows = [
+                dict(r) if isinstance(r, Mapping) else dict(zip(cols, r))
+                for r in fetched
+            ]
+        finally:
+            conn.close()
 
     pairs: list[tuple[Edge, Node]] = []
     for row in rows:
