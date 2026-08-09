@@ -305,6 +305,9 @@ def _fetch_rows_via_engine(ve: VirtualEdge, value: Any) -> list[dict] | None:
             return None
         req["source_type"] = "iceberg"
         req["bucket_arn"] = warehouse
+        # Leaf-name views: the binding query is authored against table leaf names
+        # (pyiceberg style); the engine mounts each "namespace.table" so it resolves.
+        req["tables"] = ve.iceberg_tables()
     else:
         dsn = ve.resolved_dsn()
         if dsn.startswith(("postgresql://", "postgres://")):
